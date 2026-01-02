@@ -164,7 +164,8 @@ def run_rtp_client(rtp_host: str, rtp_port: int, logger: Logger):
     caps = 'application/x-rtp,media=video,encoding-name=H264,payload=96'
     pipe_str = (
         f'udpsrc port={rtp_port} caps="{caps}" ! '
-        "rtpjitterbuffer latency=0 drop-on-late=true ! "
+        # В некоторых сборках GStreamer нет свойства drop-on-late, используем drop-on-latency.
+        "rtpjitterbuffer latency=0 drop-on-latency=true faststart-min-packets=1 ! "
         "rtph264depay ! h264parse ! "
         f"{decoder_name} ! videoconvert ! "
         f"{sink_name} sync=false"
