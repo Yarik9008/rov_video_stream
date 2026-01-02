@@ -21,6 +21,7 @@ import threading
 import time
 from pathlib import Path
 from logging import INFO
+from fractions import Fraction
 
 from Logger import Logger, loggingLevels
 
@@ -177,6 +178,7 @@ class _SharedFrameSource:
 
         self._lock = threading.Lock()
         self._latest = None  # numpy array (bgr)
+        self._latest_ts = 0.0  # monotonic timestamp of latest frame
         self._running = False
         self._thread = None
 
@@ -205,6 +207,12 @@ class _SharedFrameSource:
 
         if not self._cap or not self._cap.isOpened():
             raise RuntimeError("Не удалось открыть источник видео (камера/файл).")
+
+        # Best-effort: уменьшаем внутренний буфер захвата для минимальной задержки (не везде поддерживается).
+        try:
+            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
 
         # попытка настроить камеру (только FPS; размер не трогаем — нужен нативный)
         if not self._is_file:
@@ -246,6 +254,19 @@ class _SharedFrameSource:
                 return self._latest.copy()
             except Exception:
                 return None
+
+    def get_latest_with_ts(self):
+        """
+        Возвращает (frame_copy, ts) где ts — monotonic timestamp последнего кадра.
+        Нужен для минимальной задержки: трек ждёт именно НОВЫЙ кадр, без второго pacing.
+        """
+        with self._lock:
+            if self._latest is None:
+                return None, 0.0
+            try:
+                return self._latest.copy(), float(self._latest_ts)
+            except Exception:
+                return None, 0.0
     
     def get_video_size(self):
         """Возвращает реальные размеры видео (width, height) или None, если не определены."""
@@ -328,6 +349,7 @@ class _SharedFrameSource:
 
             with self._lock:
                 self._latest = frame
+                self._latest_ts = time.monotonic()
 
 
 def _make_capture_track(shared: _SharedFrameSource, fps: int):
@@ -337,33 +359,37 @@ def _make_capture_track(shared: _SharedFrameSource, fps: int):
         def __init__(self, _shared: _SharedFrameSource):
             super().__init__()
             self._shared = _shared
+            # Для минимальной задержки НЕ делаем второй pacing в треке.
+            # Вместо этого ждём новый кадр от shared-источника и отправляем сразу.
             self._fps = max(1, int(fps))
-            self._frame_period = 1.0 / float(self._fps)
-            self._next_ts = time.time()
+            self._clock_rate = 90000
+            self._time_base = Fraction(1, self._clock_rate)
+            self._pts = 0
+            self._pts_step = max(1, int(self._clock_rate / float(self._fps)))
+            self._last_frame_ts = 0.0
             
         async def recv(self):
-            # pacing
-            now = time.time()
-            delay = self._next_ts - now
-            if delay > 0:
-                await asyncio.sleep(delay)
-            self._next_ts = max(self._next_ts + self._frame_period, time.time())
-
-            pts, time_base = await self.next_timestamp()
-
-            # ждём первый кадр (камера/файл могут стартовать не сразу)
+            # ждём НОВЫЙ кадр (камера/файл могут стартовать не сразу)
+            # Важно: это снижает задержку, т.к. мы не “усыпляем” трек сверх чтения кадра.
+            deadline = time.monotonic() + 2.0
             frame = None
-            for _ in range(200):  # ~2s с шагом 10ms
-                frame = self._shared.get_latest()
-                if frame is not None:
+            ts = 0.0
+
+            while time.monotonic() < deadline:
+                frame, ts = self._shared.get_latest_with_ts()
+                if frame is not None and ts > self._last_frame_ts:
                     break
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.001)
+
             if frame is None:
                 raise RuntimeError("Нет кадров от источника (камера/файл).")
 
+            self._last_frame_ts = ts
+            self._pts += self._pts_step
+
             vf = VideoFrame.from_ndarray(frame, format="bgr24")
-            vf.pts = pts
-            vf.time_base = time_base
+            vf.pts = self._pts
+            vf.time_base = self._time_base
             return vf
 
         def stop(self):
@@ -762,9 +788,23 @@ def main():
         args.file = test_video_path
         args.width = 0  # 0 означает использовать исходное разрешение
         args.height = 0  # 0 означает использовать исходное разрешение
-        # Увеличиваем битрейт для тестового видео, чтобы уменьшить сжатие
-        # Устанавливаем очень высокий битрейт для минимального сжатия (200 Mbps)
-        args.bitrate = 200000
+        # Для тестового видео включаем max-quality и пытаемся взять FPS из файла,
+        # чтобы передавать в исходном качестве с минимальной задержкой.
+        args.max_quality = True
+        try:
+            cv2, *_rest = _lazy_imports()
+            cap = cv2.VideoCapture(str(Path(test_video_path).resolve()))
+            try:
+                file_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                if file_fps >= 1.0 and file_fps <= 240.0:
+                    args.fps = int(round(file_fps))
+            finally:
+                cap.release()
+        except Exception:
+            pass
+
+        # Битрейт выставляем высоким как baseline (дальше в offer при max-quality он будет пересчитан по размеру/FPS)
+        args.bitrate = 500000
     
     # Обработка режима максимального качества
     if args.max_quality:
