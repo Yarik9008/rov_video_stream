@@ -92,43 +92,29 @@ def get_broadcast_address(ip: str) -> str:
     return "255.255.255.255"
 
 
-def calculate_optimal_bitrate(width: int, height: int, fps: int, low_latency: bool = False) -> int:
+def calculate_optimal_bitrate(width: int, height: int, fps: int) -> int:
     """
-    Рассчитывает оптимальный битрейт на основе разрешения и FPS.
+    Рассчитывает оптимальный битрейт для баланса качества и задержки.
     
     Формула: битрейт = (ширина * высота * FPS * бит_на_пиксель) / 1000
-    
-    Args:
-        width: ширина видео
-        height: высота видео
-        fps: частота кадров
-        low_latency: если True, используется меньший битрейт для снижения задержки
+    Используется 0.25 bpp - оптимальный баланс между качеством и задержкой.
     
     Returns: битрейт в kbps
     """
     if width <= 0 or height <= 0 or fps <= 0:
-        return 10000  # Fallback: 10 Mbps (оптимально для низкой задержки)
+        return 15000  # Fallback: 15 Mbps
     
     pixels = width * height
+    # Оптимальный баланс: 0.25 bpp
+    # - 1080p@30 при 0.25 bpp ≈ 15.6 Mbps
+    # - 720p@30  при 0.25 bpp ≈ 6.9 Mbps
+    # - 4K@30    при 0.25 bpp ≈ 62.2 Mbps
+    bits_per_pixel = 0.25
+    bitrate_bps = pixels * fps * bits_per_pixel
+    bitrate_kbps = int(bitrate_bps / 1000)
     
-    if low_latency:
-        # Для низкой задержки используем меньший битрейт
-        # - 1080p@30 при 0.15 bpp ≈ 9.3 Mbps
-        # - 720p@30  при 0.15 bpp ≈ 4.2 Mbps
-        bits_per_pixel = 0.15
-        bitrate_bps = pixels * fps * bits_per_pixel
-        bitrate_kbps = int(bitrate_bps / 1000)
-        # Ограничения для низколатентного режима
-        bitrate_kbps = max(3000, min(50000, bitrate_kbps))
-    else:
-        # Для максимального качества
-        # - 1080p@30 при 0.5 bpp ≈ 31 Mbps
-        # - 4K@60   при 0.5 bpp ≈ 249 Mbps
-        bits_per_pixel = 0.5
-        bitrate_bps = pixels * fps * bits_per_pixel
-        bitrate_kbps = int(bitrate_bps / 1000)
-        # Ограничения для режима максимального качества
-        bitrate_kbps = max(20000, min(500000, bitrate_kbps))
+    # Ограничения для оптимального режима
+    bitrate_kbps = max(5000, min(100000, bitrate_kbps))
     
     return bitrate_kbps
 
@@ -631,16 +617,16 @@ async def run_server(args, logger: Logger):
             sender = pc.addTrack(track)
             _prefer_h264(pc)
 
-            # Определяем битрейт: автоматический расчет в режиме максимального качества или низкой задержки
-            target_bitrate = int(args.bitrate)
-            if args.max_quality or args.low_latency:
-                video_size = shared.get_video_size()
-                if video_size:
-                    width, height = video_size
-                    use_low_latency = args.low_latency and not args.max_quality
-                    target_bitrate = calculate_optimal_bitrate(width, height, args.fps, low_latency=use_low_latency)
-                    mode_str = "низкая задержка" if use_low_latency else "максимальное качество"
-                    logger.info(f"client#{pc_id} Автоматический битрейт ({mode_str}) для {width}x{height}@{args.fps}fps: {target_bitrate} kbps", source="server")
+            # Автоматический расчет оптимального битрейта
+            video_size = shared.get_video_size()
+            if video_size:
+                width, height = video_size
+                # Если битрейт задан явно, используем его, иначе автоматический расчет
+                target_bitrate = int(args.bitrate) if args.bitrate > 0 else calculate_optimal_bitrate(width, height, args.fps)
+                logger.info(f"client#{pc_id} Битрейт для {width}x{height}@{args.fps}fps: {target_bitrate} kbps", source="server")
+            else:
+                # Если не удалось определить размер, используем значение из аргументов или по умолчанию
+                target_bitrate = int(args.bitrate) if args.bitrate > 0 else 15000
 
             # Качество: попросим encoder о более высоком битрейте/фпс
             await _apply_sender_quality(sender, target_bitrate, int(args.fps))
@@ -717,16 +703,12 @@ async def run_server(args, logger: Logger):
     if video_size:
         width, height = video_size
         logger.info(f"Разрешение видео: {width}x{height}", source="server")
-        if args.max_quality:
-            auto_bitrate = calculate_optimal_bitrate(width, height, args.fps, low_latency=False)
-            logger.info(f"Режим максимального качества: ВКЛ (автобитрейт: {auto_bitrate} kbps)", source="server")
-        elif args.low_latency:
-            auto_bitrate = calculate_optimal_bitrate(width, height, args.fps, low_latency=True)
-            logger.info(f"Режим низкой задержки: ВКЛ (автобитрейт: {auto_bitrate} kbps)", source="server")
-        else:
-            logger.info(f"Битрейт: {args.bitrate} kbps ({args.bitrate/1000:.1f} Mbps)", source="server")
-    else:
+        auto_bitrate = calculate_optimal_bitrate(width, height, args.fps)
+        logger.info(f"Битрейт (автоматический): {auto_bitrate} kbps ({auto_bitrate/1000:.1f} Mbps)", source="server")
+    elif args.bitrate > 0:
         logger.info(f"Битрейт: {args.bitrate} kbps ({args.bitrate/1000:.1f} Mbps)", source="server")
+    else:
+        logger.info(f"Битрейт: автоматический (15 Mbps по умолчанию)", source="server")
     logger.info(f"FPS: {args.fps}", source="server")
     if args.width > 0 and args.height > 0:
         logger.info(f"Ресайз: {args.width}x{args.height}", source="server")
@@ -785,28 +767,11 @@ def main():
     parser.add_argument("-t", "--test", action="store_true", default=False, help="Транслировать тестовое видео test.mp4 в исходном разрешении")
     parser.add_argument("--host", type=str, default=None, help="Хост для режима LAN (обычно 0.0.0.0)")
     parser.add_argument("--signal-port", type=int, default=8080, help="Порт HTTP signaling (по умолчанию 8080)")
-    # По умолчанию используем 1080p для оптимального баланса качества и задержки
-    # Если хотите передавать в нативном разрешении источника — укажите: --width 0 --height 0
-    # Для 4K используйте: --width 3840 --height 2160
+    # Оптимальные настройки по умолчанию: баланс качества и задержки
     parser.add_argument("--width", type=int, default=1920, help="Ширина (по умолчанию 1920 = 1080p; 0 = исходное разрешение)")
     parser.add_argument("--height", type=int, default=1080, help="Высота (по умолчанию 1080 = 1080p; 0 = исходное разрешение)")
-    parser.add_argument("--fps", type=int, default=30, help="FPS (рекомендуется 30 для оптимальной задержки, 60 для максимального качества)")
-    # Максимальное качество включено по умолчанию.
-    # argparse.BooleanOptionalAction создаёт флаги:
-    #   --max-quality / --no-max-quality
-    parser.add_argument(
-        "--max-quality",
-        default=False,
-        action=argparse.BooleanOptionalAction,
-        help="Режим максимального качества (по умолчанию ВЫКЛ): автоматический битрейт на основе разрешения, без ресайза",
-    )
-    parser.add_argument(
-        "--low-latency",
-        default=True,
-        action=argparse.BooleanOptionalAction,
-        help="Режим низкой задержки (по умолчанию ВКЛ): оптимизация для минимальной задержки",
-    )
-    parser.add_argument("--bitrate", type=int, default=10000, help="Целевой битрейт видео (kbps), по умолчанию 10000 (10 Mbps для оптимальной задержки)")
+    parser.add_argument("--fps", type=int, default=30, help="FPS (по умолчанию 30)")
+    parser.add_argument("--bitrate", type=int, default=0, help="Битрейт в kbps (по умолчанию 0 = автоматический расчет)")
     parser.add_argument("--device", type=int, default=0, help="Индекс камеры (для webcam)")
     parser.add_argument("--stun", action="store_true", default=False, help="Использовать публичный STUN (для LAN не нужно)")
     parser.add_argument("--log-level", type=str, default="info", choices=["spam", "debug", "verbose", "info", "warning", "error", "critical"], help="Уровень логирования")
@@ -819,11 +784,8 @@ def main():
         test_video_path = Path(__file__).parent / "video" / "test.mp4"
         args.source = "file"
         args.file = str(test_video_path)
-        args.width = 0  # 0 означает использовать исходное разрешение
-        args.height = 0  # 0 означает использовать исходное разрешение
-        # Для тестового видео включаем max-quality и пытаемся взять FPS из файла,
-        # чтобы передавать в исходном качестве с минимальной задержкой.
-        args.max_quality = True
+        args.width = 0  # Используем исходное разрешение
+        args.height = 0
         try:
             cv2, *_rest = _lazy_imports()
             if test_video_path.exists():
@@ -834,32 +796,8 @@ def main():
                         args.fps = int(round(file_fps))
                 finally:
                     cap.release()
-            else:
-                # Warning will be logged later by the logger
-                pass
         except Exception:
             pass
-
-        # Битрейт выставляем высоким как baseline (дальше в offer при max-quality он будет пересчитан по размеру/FPS)
-        args.bitrate = 500000
-    
-    # Обработка режимов качества и задержки
-    if args.max_quality and args.low_latency:
-        # Если оба режима включены, приоритет у низкой задержки
-        logger.warning("Включены оба режима: максимальное качество и низкая задержка. Используется режим низкой задержки.", source="server")
-        args.max_quality = False
-    
-    if args.max_quality:
-        # В режиме максимального качества:
-        # 1. Используем исходное разрешение (если не указано явно)
-        if args.width == 0 and args.height == 0:
-            # Разрешение будет определено автоматически из источника
-            pass
-        # 2. Автоматически рассчитываем битрейт на основе разрешения
-        # (будет пересчитан после получения реального разрешения)
-        # 3. Увеличиваем FPS если возможно
-        if args.fps < 30:
-            args.fps = 30
     
     log_level = loggingLevels.get(args.log_level, INFO)
     logger = Logger("server", args.log_path, log_level)
