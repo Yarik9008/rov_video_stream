@@ -620,7 +620,7 @@ class MainWindow(QMainWindow):
 
         # Статус - жестко привязан к нижней границе окна
         self.status_label = QLabel("Готов к подключению")
-        self.status_label.setStyleSheet("padding: 6px; background-color: #1e1e1e; color: #dcdcdc;")
+        self.status_label.setStyleSheet("padding: 2px 6px; background-color: #1e1e1e; color: #dcdcdc;")
         # Устанавливаем политику размера: Fixed по вертикали, чтобы статус имел фиксированную высоту
         if PYQT6:
             self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
