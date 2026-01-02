@@ -19,7 +19,7 @@ pip install -r requirements.txt
 ### Сервер (LAN, авто‑IP, broadcast discovery)
 
 ```bash
-python server.py --host 0.0.0.0 --signal-port 8080
+python3 server.py --host 0.0.0.0 --signal-port 8080
 ```
 
 По умолчанию сервер шлёт broadcast на UDP порт `5003`, и клиент может найти его автоматически.
@@ -27,13 +27,13 @@ python server.py --host 0.0.0.0 --signal-port 8080
 ### Клиент (автообнаружение)
 
 ```bash
-python client.py --auto
+python3 client.py --auto
 ```
 
 ### Клиент (вручную)
 
 ```bash
-python client.py --host <IP_СЕРВЕРА> --signal-port 8080
+python3 client.py --host <IP_СЕРВЕРА> --signal-port 8080
 ```
 
 ## Параметры

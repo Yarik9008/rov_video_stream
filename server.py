@@ -22,20 +22,57 @@ from pathlib import Path
 
 
 def get_local_ip() -> str:
-    """Получает локальный IP адрес (через UDP connect без отправки данных)."""
+    """Получает локальный IPv4 адрес.
+
+    Важно: не полагаемся на доступ к интернету. Пробуем несколько способов и берём первый
+    не-loopback IPv4 (не 127.* и не 169.254.*).
+    """
+    ips = get_local_ips()
+    return ips[0] if ips else "127.0.0.1"
+
+
+def _is_usable_ipv4(ip: str) -> bool:
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0)
-        try:
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-        except Exception:
-            ip = "127.0.0.1"
-        finally:
-            s.close()
-        return ip
+        socket.inet_aton(ip)
+    except OSError:
+        return False
+    if ip.startswith("127."):
+        return False
+    if ip.startswith("169.254."):
+        return False
+    return True
+
+
+def get_local_ips() -> list[str]:
+    """Возвращает список пригодных локальных IPv4 адресов (LAN)."""
+    candidates: list[str] = []
+
+    # 1) Попробовать hostname -> адреса
+    try:
+        _hostname = socket.gethostname()
+        _name, _aliases, addrs = socket.gethostbyname_ex(_hostname)
+        for ip in addrs:
+            if _is_usable_ipv4(ip) and ip not in candidates:
+                candidates.append(ip)
     except Exception:
-        return "127.0.0.1"
+        pass
+
+    # 2) UDP connect-трюк, без отправки пакетов (нужен только выбор интерфейса)
+    for target in (("1.1.1.1", 80), ("8.8.8.8", 80), ("10.255.255.255", 1)):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0)
+            try:
+                s.connect(target)
+                ip = s.getsockname()[0]
+                if _is_usable_ipv4(ip) and ip not in candidates:
+                    candidates.append(ip)
+            finally:
+                s.close()
+        except Exception:
+            continue
+
+    return candidates
 
 
 def get_broadcast_address(ip: str) -> str:
@@ -107,7 +144,7 @@ def _make_capture_track(source: str, file_path: str, device_index: int, width: i
                     self._cap.set(cv2.CAP_PROP_FPS, self._fps)
                 except Exception:
                     pass
-
+            
         async def recv(self):
             # pacing
             now = time.time()
@@ -196,7 +233,7 @@ class DiscoveryBroadcaster:
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-
+    
     def stop(self):
         self._running = False
         if self._thread:
@@ -204,9 +241,11 @@ class DiscoveryBroadcaster:
 
     def _run(self):
         try:
-            local_ip = get_local_ip()
-            broadcast_ip = get_broadcast_address(local_ip)
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            except Exception:
+                pass
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.settimeout(1)
 
@@ -214,7 +253,17 @@ class DiscoveryBroadcaster:
                 try:
                     payload = self._payload_factory()
                     message = json.dumps(payload).encode("utf-8")
-                    sock.sendto(message, (broadcast_ip, self.DISCOVERY_PORT))
+                    # Шлём на несколько broadcast-адресов:
+                    # - 255.255.255.255 (универсальный broadcast, часто работает)
+                    # - вычисленные broadcast для найденных локальных IP (если /24 и т.п.)
+                    targets = {"255.255.255.255"}
+                    for ip in get_local_ips():
+                        targets.add(get_broadcast_address(ip))
+                    for bcast in targets:
+                        try:
+                            sock.sendto(message, (bcast, self.DISCOVERY_PORT))
+                        except Exception:
+                            continue
                     time.sleep(1.5)
                 except Exception:
                     time.sleep(1.5)
@@ -301,7 +350,7 @@ async def run_server(args):
     print(f"Signaling: http://{local_ip}:{int(args.signal_port)}")
     if host != "127.0.0.1":
         print(f"Автообнаружение: включено (UDP broadcast порт {DiscoveryBroadcaster.DISCOVERY_PORT})")
-        print("Клиент:  python client.py --auto")
+        print("Клиент:  python3 client.py --auto")
     print("\nНажмите Ctrl+C для остановки.\n")
 
     stop_event = asyncio.Event()

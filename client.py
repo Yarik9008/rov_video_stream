@@ -48,9 +48,18 @@ def discover_server(timeout: int = 5):
 
 
 def _lazy_imports():
+    missing_modules = []
     try:
         import aiohttp  # type: ignore
+    except ImportError as e:
+        missing_modules.append(("aiohttp", str(e)))
+    
+    try:
         import cv2  # type: ignore
+    except ImportError as e:
+        missing_modules.append(("opencv-python", str(e)))
+    
+    try:
         from aiortc import (  # type: ignore
             RTCPeerConnection,
             RTCSessionDescription,
@@ -58,12 +67,20 @@ def _lazy_imports():
             RTCIceServer,
             RTCRtpSender,
         )
-    except Exception as e:
+    except ImportError as e:
+        missing_modules.append(("aiortc", str(e)))
+    
+    if missing_modules:
+        modules_str = " ".join([m[0] for m in missing_modules])
+        details = "\n".join([f"  - {m[0]}: {m[1]}" for m in missing_modules])
         raise RuntimeError(
-            "Для WebRTC нужны зависимости. Установите:\n"
-            "  pip install -r requirements.txt\n"
-            f"Детали: {e}"
+            f"Для WebRTC нужны зависимости. Установите недостающие модули:\n"
+            f"  pip install {modules_str}\n\n"
+            f"Или установите все зависимости:\n"
+            f"  pip install aiohttp opencv-python aiortc\n\n"
+            f"Детали ошибок:\n{details}"
         )
+    
     return aiohttp, cv2, RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender
 
 
