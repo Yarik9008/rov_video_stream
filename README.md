@@ -7,7 +7,10 @@
 - Python 3.6+
 - GStreamer 1.0 или выше
   - **Windows**: Скачайте с [официального сайта](https://gstreamer.freedesktop.org/download/)
-  - **Linux**: `sudo apt-get install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav`
+    - После установки скрипт автоматически найдет GStreamer в стандартных местах
+  - **Linux**: 
+    - Ubuntu/Debian: `sudo apt-get install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav`
+    - Fedora: `sudo dnf install gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad gstreamer1-plugins-ugly`
   - **macOS**: `brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav`
 
 ## Установка
@@ -41,6 +44,7 @@ python server.py --source file --file путь/к/видео.mp4
 - `--width`: Ширина видео (по умолчанию: `640`)
 - `--height`: Высота видео (по умолчанию: `480`)
 - `--fps`: Частота кадров (по умолчанию: `30`)
+- `--device`: Индекс видеоустройства (по умолчанию: `0`) - для выбора конкретной веб-камеры
 
 #### Примеры:
 ```bash
@@ -49,6 +53,12 @@ python server.py --host 192.168.1.100 --width 1280 --height 720
 
 # Трансляция видео файла
 python server.py --source file --file video.mp4 --width 1920 --height 1080 --fps 25
+
+# Использование второй веб-камеры (Windows/macOS)
+python server.py --device 1
+
+# Трансляция с веб-камеры в высоком разрешении
+python server.py --width 1920 --height 1080 --fps 30
 ```
 
 ### Клиент (воспроизведение)
@@ -59,11 +69,17 @@ python client.py
 ```
 
 #### Параметры клиента:
-- `--host`: IP адрес сервера (по умолчанию: `127.0.0.1`)
+- `--host`: IP адрес сервера (по умолчанию: `127.0.0.1`, используйте `auto` для автообнаружения)
 - `--port`: Порт для видео (по умолчанию: `5004`)
+- `--auto`: Автоматически найти сервер в локальной сети
 
 #### Примеры:
 ```bash
+# Автоматический поиск сервера в локальной сети
+python client.py --auto
+# или
+python client.py --host auto
+
 # Подключение к локальному серверу
 python client.py
 
@@ -72,6 +88,26 @@ python client.py --host 192.168.1.100 --port 5004
 ```
 
 ## Пример работы
+
+### Простой способ (автообнаружение):
+
+1. **Запустите сервер** на компьютере с веб-камерой:
+   ```bash
+   python server.py --host 0.0.0.0
+   ```
+   Сервер автоматически начнет отправлять broadcast сообщения для обнаружения.
+
+2. **Запустите клиент** на любом компьютере в той же сети:
+   ```bash
+   python client.py --auto
+   ```
+   Клиент автоматически найдет сервер и подключится к нему.
+
+3. Видео должно появиться в окне клиента.
+
+4. Для остановки нажмите `Ctrl+C` на сервере или клиенте.
+
+### Ручной способ:
 
 1. **Запустите сервер** (на компьютере с веб-камерой или видео файлом):
    ```bash
@@ -112,6 +148,12 @@ python client.py --host 192.168.1.100 --port 5004
 - **Протокол**: RTP over UDP
 - **Кодек**: H.264 (x264)
 - **Формат**: Raw video → H.264 → RTP → UDP
+- **Поддерживаемые платформы**: Windows, Linux, macOS
+- **Автообнаружение**: UDP broadcast на порту 5003
+- **Источники видео**:
+  - Windows: `mfvideosrc` (Media Foundation)
+  - Linux: `v4l2src` (Video4Linux2)
+  - macOS: `avfvideosrc` (AVFoundation)
 
 ## Устранение неполадок
 
@@ -120,8 +162,9 @@ python client.py --host 192.168.1.100 --port 5004
 - На Windows добавьте путь к GStreamer в переменную окружения PATH
 
 ### Веб-камера не работает
-- **Windows**: Убедитесь, что используется правильный `device-index` (попробуйте 0, 1, 2...)
-- **Linux**: Проверьте доступность `/dev/video0` или используйте `v4l2-ctl --list-devices` для списка устройств
+- **Windows**: Убедитесь, что используется правильный `device-index` (попробуйте 0, 1, 2...). Используйте параметр `--device` для выбора устройства
+- **Linux**: Проверьте доступность `/dev/video0` или используйте `v4l2-ctl --list-devices` для списка устройств. Используйте `--device` для выбора другого устройства (например, `--device 1` для `/dev/video1`)
+- **macOS**: Используйте параметр `--device` для выбора другой камеры (0, 1, 2...)
 
 ### Видео не воспроизводится
 - Проверьте, что сервер запущен и транслирует
