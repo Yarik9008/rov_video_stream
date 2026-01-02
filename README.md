@@ -22,6 +22,66 @@ pip install -r requirements.txt
 python3 server.py --host 0.0.0.0 --signal-port 8080
 ```
 
+## GPU WebRTC (GStreamer, NVIDIA NVENC/NVDEC)
+
+Если нужна **аппаратная** кодировка/декодировка на видеокарте (NVIDIA):
+- **сервер**: `NVENC` (`nvh264enc`)
+- **клиент**: `NVDEC` (`nvh264dec`)
+
+### Требования (Windows)
+
+У вас должен быть установлен **GStreamer MSVC x86_64** (как минимум плагины `webrtcbin` и `nvcodec`):
+
+- `gst-inspect-1.0 webrtcbin`
+- `gst-inspect-1.0 nvh264enc`
+- `gst-inspect-1.0 nvh264dec`
+
+Также для управления `webrtcbin` из Python нужен GI typelib:
+
+- `GstWebRTC-1.0.typelib` (namespace `GstWebRTC`)
+
+Он должен находиться в:
+
+`C:\Program Files\GStreamer\1.0\msvc_x86_64\lib\girepository-1.0`
+
+Если `GstWebRTC-1.0.typelib` отсутствует, `server_gst.py/client_gst.py` не смогут делать offer/answer/ICE.
+
+Важно: в официальной сборке GStreamer Python bindings (`gi`) лежат внутри:
+
+`C:\Program Files\GStreamer\1.0\msvc_x86_64\lib\site-packages`
+
+Скрипты `server_gst.py` / `client_gst.py` **автоматически добавляют** этот путь в `sys.path`
+и настраивают `GI_TYPELIB_PATH`/DLL paths.
+
+Если у вас нестандартный путь установки — задайте переменную окружения:
+
+`GSTREAMER_1_0_ROOT_MSVC_X86_64`
+
+### Запуск GPU сервера
+
+```bash
+python3 server_gst.py --host 0.0.0.0 --signal-port 8080 --width 3840 --height 2160 --fps 60 --bitrate 250000
+```
+
+Примечания:
+- `--bitrate` задаётся в **kbit/sec** (например 250000 = 250 Mbps)
+- для минимальной задержки можно оставить `--webrtc-latency 0`
+
+### Запуск GPU клиента (auto-discovery)
+
+```bash
+python3 client_gst.py --auto
+```
+
+### Режим file passthrough (макс. качество/мин. задержка, но без NVENC)
+
+Если файл уже H.264 (например `mp4`), можно отправлять его **без перекодирования**
+(это даёт максимально возможное качество и минимальную задержку, но NVENC не используется):
+
+```bash
+python3 server_gst.py --source file --file video/test.mp4 --file-passthrough --host 0.0.0.0
+```
+
 ### Режим максимального качества
 
 Для максимального качества используйте режим `--max-quality` (автоматический расчет битрейта):
