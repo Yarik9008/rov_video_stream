@@ -199,10 +199,11 @@ class VideoStreamClient:
     # Порт для UDP broadcast обнаружения
     DISCOVERY_PORT = 5003
     
-    def __init__(self, host='127.0.0.1', video_port=5004, audio_port=5006, auto_discover=False):
+    def __init__(self, host='127.0.0.1', video_port=5004, audio_port=5006, auto_discover=False, codec='h264'):
         self.host = host
         self.video_port = video_port
         self.audio_port = audio_port
+        self.codec = codec.lower()  # 'h264' или 'jpeg'
         self.process = None
         self.system = platform.system()
         self.auto_discover = auto_discover
@@ -211,8 +212,8 @@ class VideoStreamClient:
         """Строит GStreamer pipeline для клиента"""
         # Прием RTP потока и воспроизведение
         # Оптимизированные настройки для минимальной задержки:
-        # - buffer-size=65536: минимальный буфер для уменьшения задержки
-        # - queue leaky=downstream: сбрасывать старые кадры при переполнении (аналог drop-on-latency)
+        # - buffer-size=32768: минимальный буфер для уменьшения задержки
+        # - queue leaky=downstream: сбрасывать старые кадры при переполнении
         # - sync=false: отключение синхронизации для минимальной задержки
         # - max-lateness=-1: игнорировать задержку (сбрасывать поздние кадры)
         # Используем платформо-специфичные видеосинки для поддержки max-lateness
@@ -232,16 +233,30 @@ class VideoStreamClient:
             # Fallback на autovideosink
             videosink = "autovideosink sync=false"
         
-        pipeline = (
-            f"udpsrc port={self.video_port} buffer-size=65536 ! "
-            f"application/x-rtp,encoding-name=H265,payload=96 ! "
-            f"rtph265depay ! "
-            f"h265parse ! "
-            f"avdec_h265 ! "
-            f"videoconvert ! "
-            f"queue max-size-time=0 max-size-bytes=0 leaky=downstream ! "
-            f"{videosink}"
-        )
+        # Выбираем pipeline в зависимости от кодека
+        if self.codec == 'jpeg':
+            # JPEG декодирование - очень быстрое, минимальная задержка
+            pipeline = (
+                f"udpsrc port={self.video_port} buffer-size=32768 ! "
+                f"application/x-rtp,encoding-name=JPEG,payload=96 ! "
+                f"rtpjpegdepay ! "
+                f"jpegdec ! "
+                f"videoconvert ! "
+                f"queue max-size-time=0 max-size-bytes=0 max-size-buffers=0 leaky=downstream ! "
+                f"{videosink}"
+            )
+        else:
+            # H.264 декодирование
+            pipeline = (
+                f"udpsrc port={self.video_port} buffer-size=32768 ! "
+                f"application/x-rtp,encoding-name=H264,payload=96 ! "
+                f"rtph264depay ! "
+                f"h264parse ! "
+                f"avdec_h264 ! "
+                f"videoconvert ! "
+                f"queue max-size-time=0 max-size-bytes=0 max-size-buffers=0 leaky=downstream ! "
+                f"{videosink}"
+            )
         
         return pipeline
     
@@ -368,6 +383,8 @@ def main():
                         help='Порт для видео (по умолчанию: 5004)')
     parser.add_argument('--auto', action='store_true', default=False,
                         help='Автоматически найти сервер в локальной сети')
+    parser.add_argument('--codec', choices=['h264', 'jpeg'], default='h264',
+                        help='Кодек: h264 (по умолчанию) или jpeg (должен совпадать с сервером)')
     
     args = parser.parse_args()
     
@@ -382,7 +399,8 @@ def main():
     client = VideoStreamClient(
         host=args.host,
         video_port=args.port,
-        auto_discover=auto_discover
+        auto_discover=auto_discover,
+        codec=args.codec
     )
     
     # Регистрируем автоматическое завершение при выходе из программы

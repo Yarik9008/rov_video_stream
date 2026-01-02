@@ -200,7 +200,7 @@ class VideoStreamServer:
     
     def __init__(self, source='webcam', file_path=None, host=None, port=5000, 
                  video_port=5004, audio_port=5006, width=640, height=480, fps=30, device_index=0,
-                 enable_discovery=True, bitrate=2000):
+                 enable_discovery=True, bitrate=2000, codec='h264'):
         self.source = source
         self.file_path = file_path
         
@@ -228,6 +228,7 @@ class VideoStreamServer:
         self.fps = fps
         self.device_index = device_index
         self.bitrate = bitrate
+        self.codec = codec.lower()  # 'h264' или 'jpeg'
         self.process = None
         self.system = platform.system()
         # Автоматически включаем обнаружение если не localhost
@@ -246,13 +247,20 @@ class VideoStreamServer:
             if self.system == 'Windows':
                 # Windows использует mfvideosrc (Media Foundation)
                 # do-timestamp=true: использовать временные метки для синхронизации
-                source_pipeline = (
-                    f"mfvideosrc device-index={self.device_index} do-timestamp=true ! "
-                    f"video/x-raw ! "
-                    f"videoconvert ! "
-                    f"videoscale ! "
-                    f"video/x-raw,width={self.width},height={self.height},framerate={self.fps}/1 ! "
-                )
+                # Для JPEG используем формат YUY2 напрямую (быстрее)
+                if self.codec == 'jpeg':
+                    source_pipeline = (
+                        f"mfvideosrc device-index={self.device_index} do-timestamp=true ! "
+                        f"video/x-raw,format=YUY2,width={self.width},height={self.height},framerate={self.fps}/1 ! "
+                    )
+                else:
+                    source_pipeline = (
+                        f"mfvideosrc device-index={self.device_index} do-timestamp=true ! "
+                        f"video/x-raw ! "
+                        f"videoconvert ! "
+                        f"videoscale ! "
+                        f"video/x-raw,width={self.width},height={self.height},framerate={self.fps}/1 ! "
+                    )
             elif self.system == 'Darwin':
                 # macOS использует avfvideosrc (AVFoundation)
                 # do-timestamp=true: использовать временные метки для синхронизации
@@ -303,32 +311,58 @@ class VideoStreamServer:
             # Используем broadcast для отправки на все интерфейсы локальной сети
             video_host = get_broadcast_address(self.local_ip)
         
-        # Кодирование H.265 (HEVC) и отправка через RTP
-        # Используем аппаратный энкодер на macOS для лучшей производительности
-        # Оптимизированные настройки для минимальной задержки:
-        if self.system == 'Darwin':
-            # macOS: используем аппаратный энкодер VideoToolbox (vtenc_h265)
-            encoder = f"vtenc_h265 bitrate={self.bitrate} realtime=true allow-frame-reordering=false"
-        elif self.system == 'Linux':
-            # Linux: используем программный x265enc
-            encoder = (
-                f"x265enc tune=zerolatency bitrate={self.bitrate} speed-preset=ultrafast "
-                f"key-int-max=30 threads=4 bframes=0"
-            )
+        # Выбираем кодек: JPEG (быстрее, но больше размер) или H.264 (лучше качество)
+        if self.codec == 'jpeg':
+            # JPEG кодирование - очень быстрое, минимальная задержка
+            # Для Windows используем YUY2 формат напрямую (уже установлен в source_pipeline)
+            if self.system != 'Windows':
+                # Для других платформ конвертируем в нужный формат
+                pipeline = (
+                    source_pipeline +
+                    f"videoconvert ! "
+                    f"jpegenc quality=85 ! "
+                    f"rtpjpegpay pt=96 mtu=1200 ! "
+                    f"udpsink host={video_host} port={self.video_port} buffer-size=32768 sync=false"
+                )
+            else:
+                # Windows: YUY2 формат уже установлен в source_pipeline
+                pipeline = (
+                    source_pipeline +
+                    f"jpegenc quality=85 ! "
+                    f"rtpjpegpay pt=96 mtu=1200 ! "
+                    f"udpsink host={video_host} port={self.video_port} buffer-size=32768 sync=false"
+                )
         else:
-            # Windows: используем x265enc
-            encoder = (
-                f"x265enc tune=zerolatency bitrate={self.bitrate} speed-preset=ultrafast "
-                f"key-int-max=30 threads=4 bframes=0"
+            # H.264 кодирование - оптимальный баланс качества и производительности
+            # Оптимизированные настройки для минимальной задержки:
+            if self.system == 'Darwin':
+                # macOS: используем аппаратный энкодер VideoToolbox (vtenc_h264) для минимальной задержки
+                encoder = (
+                    f"vtenc_h264 bitrate={self.bitrate} realtime=true allow-frame-reordering=false "
+                    f"keyframe-interval={self.fps * 2} max-keyframe-interval={self.fps * 2}"
+                )
+            elif self.system == 'Linux':
+                # Linux: используем программный x264enc с оптимизацией для низкой задержки
+                encoder = (
+                    f"x264enc tune=zerolatency bitrate={self.bitrate} speed-preset=ultrafast "
+                    f"key-int-max={self.fps * 2} threads=4 bframes=0 sliced-threads=true "
+                    f"sync-lookahead=0 rc-lookahead=0"
+                )
+            else:
+                # Windows: используем x264enc с оптимизацией для низкой задержки
+                encoder = (
+                    f"x264enc tune=zerolatency bitrate={self.bitrate} speed-preset=ultrafast "
+                    f"key-int-max={self.fps * 2} threads=4 bframes=0 sliced-threads=true "
+                    f"sync-lookahead=0 rc-lookahead=0"
+                )
+            
+            pipeline = (
+                source_pipeline +
+                f"{encoder} ! "
+                f"h264parse config-interval=1 ! "
+                f"rtph264pay config-interval=1 pt=96 mtu=1200 ! "
+                f"udpsink host={video_host} port={self.video_port} buffer-size=32768 sync=false"
             )
-        
-        pipeline = (
-            source_pipeline +
-            f"{encoder} ! "
-            f"h265parse ! "
-            f"rtph265pay config-interval=1 pt=96 mtu=1400 ! "
-            f"udpsink host={video_host} port={self.video_port} buffer-size=65536 sync=false"
-        )
         
         return pipeline
     
@@ -545,6 +579,8 @@ def main():
                         help='Индекс видеоустройства (по умолчанию: 0)')
     parser.add_argument('--bitrate', type=int, default=2000,
                         help='Битрейт видео в kbps (по умолчанию: 2000, для низкой задержки используйте 1000-3000)')
+    parser.add_argument('--codec', choices=['h264', 'jpeg'], default='h264',
+                        help='Кодек: h264 (по умолчанию) или jpeg (быстрее, но больше размер)')
     
     args = parser.parse_args()
     
@@ -560,7 +596,8 @@ def main():
         height=args.height,
         fps=args.fps,
         device_index=args.device,
-        bitrate=args.bitrate
+        bitrate=args.bitrate,
+        codec=args.codec
     )
     
     # Регистрируем автоматическое завершение при выходе из программы
