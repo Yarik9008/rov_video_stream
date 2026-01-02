@@ -150,6 +150,31 @@ def _best_sink_element() -> str:
     return "autovideosink"
 
 
+def _start_bus_logger(pipeline: Gst.Pipeline, logger: Logger, source: str):
+    def _run():
+        try:
+            bus = pipeline.get_bus()
+            if bus is None:
+                return
+            while True:
+                msg = bus.timed_pop(500 * Gst.MSECOND)
+                if msg is None:
+                    continue
+                t = msg.type
+                if t == Gst.MessageType.ERROR:
+                    err, dbg = msg.parse_error()
+                    logger.error(f"GST ERROR: {err} | {dbg}", source=source)
+                elif t == Gst.MessageType.WARNING:
+                    err, dbg = msg.parse_warning()
+                    logger.warning(f"GST WARNING: {err} | {dbg}", source=source)
+                elif t == Gst.MessageType.EOS:
+                    logger.info("GST EOS", source=source)
+        except Exception:
+            return
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def run_rtp_client(rtp_host: str, rtp_port: int, logger: Logger):
     """
     One-way RTP/H264 over UDP (no WebRTC, no GstWebRTC typelibs needed).
@@ -173,6 +198,7 @@ def run_rtp_client(rtp_host: str, rtp_port: int, logger: Logger):
     logger.info(f"GST RTP pipeline: {pipe_str}", source="client_gst")
     pipeline = Gst.parse_launch(pipe_str)
     if isinstance(pipeline, Gst.Pipeline):
+        _start_bus_logger(pipeline, logger, "client_gst")
         pipeline.set_state(Gst.State.PLAYING)
 
     logger.info(f"RTP listen: udp://0.0.0.0:{rtp_port} (server advertises {rtp_host})", source="client_gst")

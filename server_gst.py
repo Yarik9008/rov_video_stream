@@ -306,6 +306,43 @@ def _nvenc_or_fallback(bitrate_kbps: int, fps: int) -> str:
     return "openh264enc"
 
 
+def _start_bus_logger(pipeline: Gst.Pipeline, logger: Logger, source: str):
+    """
+    Poll GStreamer bus and log errors/warnings/state changes.
+    Works without running a GLib mainloop.
+    """
+
+    def _run():
+        try:
+            bus = pipeline.get_bus()
+            if bus is None:
+                return
+            while True:
+                msg = bus.timed_pop(500 * Gst.MSECOND)
+                if msg is None:
+                    continue
+                t = msg.type
+                if t == Gst.MessageType.ERROR:
+                    err, dbg = msg.parse_error()
+                    logger.error(f"GST ERROR: {err} | {dbg}", source=source)
+                elif t == Gst.MessageType.WARNING:
+                    err, dbg = msg.parse_warning()
+                    logger.warning(f"GST WARNING: {err} | {dbg}", source=source)
+                elif t == Gst.MessageType.EOS:
+                    logger.info("GST EOS", source=source)
+                elif t == Gst.MessageType.STATE_CHANGED:
+                    try:
+                        if msg.src == pipeline:
+                            old, new, pending = msg.parse_state_changed()
+                            logger.debug(f"GST state: {old.value_nick}->{new.value_nick} (pending={pending.value_nick})", source=source)
+                    except Exception:
+                        pass
+        except Exception:
+            return
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 class _PeerSession:
     def __init__(self, peer_id: str, webrtcbin: Gst.Element):
         self.peer_id = peer_id
@@ -551,13 +588,8 @@ class GstRtpServer:
                 raise FileNotFoundError(f"Файл не найден: {file_path}")
 
             if self.args.file_passthrough:
-                pipe = (
-                    f'filesrc location="{file_path}" ! qtdemux name=demux '
-                    "demux.video_0 ! queue max-size-buffers=2 leaky=downstream ! "
-                    "h264parse ! rtph264pay pt=96 config-interval=1 ! "
-                    f"udpsink host={rtp_host} port={rtp_port} sync=false async=false"
-                )
                 self.logger.info("GST RTP server: file passthrough (no re-encode)", source="server_gst")
+                return self._build_file_h264_passthrough(file_path, rtp_host, rtp_port)
             else:
                 enc = _nvenc_or_fallback(bitrate, fps)
                 pipe = (
@@ -585,9 +617,105 @@ class GstRtpServer:
             pipeline = pipeline  # type: ignore[assignment]
         return pipeline
 
+    def _build_file_h264_passthrough(self, file_path: str, rtp_host: str, rtp_port: int) -> Gst.Pipeline:
+        """
+        Programmatic pipeline to handle qtdemux dynamic pads robustly.
+        filesrc -> qtdemux -(video pad)-> queue -> h264parse -> rtph264pay -> udpsink
+        """
+        pipeline = Gst.Pipeline.new("rtp_file_passthrough")
+
+        filesrc = Gst.ElementFactory.make("filesrc", None)
+        demux = Gst.ElementFactory.make("qtdemux", None)
+        queue = Gst.ElementFactory.make("queue", None)
+        h264parse = Gst.ElementFactory.make("h264parse", None)
+        pay = Gst.ElementFactory.make("rtph264pay", None)
+        sink = Gst.ElementFactory.make("udpsink", None)
+
+        if not all([pipeline, filesrc, demux, queue, h264parse, pay, sink]):
+            raise RuntimeError("Не удалось создать элементы GStreamer для file passthrough.")
+
+        filesrc.set_property("location", str(file_path))
+
+        # queue: minimal buffering, drop if downstream slow
+        try:
+            queue.set_property("max-size-buffers", 2)
+            queue.set_property("max-size-bytes", 0)
+            queue.set_property("max-size-time", 0)
+            # leaky: 2 = downstream
+            queue.set_property("leaky", 2)
+        except Exception:
+            pass
+
+        try:
+            pay.set_property("pt", 96)
+            pay.set_property("config-interval", 1)
+        except Exception:
+            pass
+
+        sink.set_property("host", str(rtp_host))
+        sink.set_property("port", int(rtp_port))
+        try:
+            sink.set_property("sync", False)
+        except Exception:
+            pass
+        try:
+            sink.set_property("async", False)
+        except Exception:
+            pass
+
+        pipeline.add(filesrc)
+        pipeline.add(demux)
+        pipeline.add(queue)
+        pipeline.add(h264parse)
+        pipeline.add(pay)
+        pipeline.add(sink)
+
+        if not filesrc.link(demux):
+            raise RuntimeError("Не удалось связать filesrc -> qtdemux")
+
+        # Link step-by-step to get better diagnostics on Windows builds
+        if not queue.link(h264parse):
+            raise RuntimeError("Не удалось связать queue -> h264parse")
+        if not h264parse.link(pay):
+            raise RuntimeError("Не удалось связать h264parse -> rtph264pay")
+        if not pay.link(sink):
+            raise RuntimeError("Не удалось связать rtph264pay -> udpsink")
+
+        linked = {"video": False}
+
+        def _on_pad_added(_demux, pad: Gst.Pad):
+            try:
+                if linked["video"]:
+                    return
+                caps = pad.get_current_caps() or pad.query_caps(None)
+                caps_str = caps.to_string() if caps else ""
+                # We only care about the H264 video stream
+                if "video/x-h264" not in caps_str:
+                    return
+                sinkpad = queue.get_static_pad("sink")
+                if sinkpad is None or sinkpad.is_linked():
+                    return
+                res = pad.link(sinkpad)
+                if res == Gst.PadLinkReturn.OK:
+                    linked["video"] = True
+                    self.logger.info(f"qtdemux linked video pad: {caps_str}", source="server_gst")
+                else:
+                    self.logger.error(f"qtdemux pad link failed: {res} caps={caps_str}", source="server_gst")
+            except Exception as e:
+                self.logger.error(f"qtdemux pad-added error: {e}", source="server_gst")
+
+        demux.connect("pad-added", _on_pad_added)
+
+        self.logger.info(
+            f"GST RTP pipeline (programmatic): filesrc({file_path}) -> qtdemux -> (video/x-h264) -> udpsink({rtp_host}:{rtp_port})",
+            source="server_gst",
+        )
+        return pipeline
+
     def start(self):
         Gst.init(None)
         self.pipeline = self.build_pipeline()
+        _start_bus_logger(self.pipeline, self.logger, "server_gst")
         self.pipeline.set_state(Gst.State.PLAYING)
 
     def stop(self):
