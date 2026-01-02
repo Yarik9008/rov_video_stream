@@ -17,6 +17,7 @@ import shutil
 import socket
 import json
 import time
+import atexit
 
 def find_gstreamer():
     """Находит GStreamer на любой платформе и добавляет в PATH"""
@@ -209,15 +210,20 @@ class VideoStreamClient:
     def build_pipeline(self):
         """Строит GStreamer pipeline для клиента"""
         # Прием RTP потока и воспроизведение
+        # Оптимизированные настройки для минимальной задержки:
+        # - buffer-size=65536: минимальный буфер для уменьшения задержки
+        # - sync=false: отключение синхронизации для минимальной задержки
+        # - drop-on-latency=true: сброс кадров при задержке
+        # - max-lateness=-1: игнорировать задержку
         # autovideosink автоматически выберет подходящий видеовыход для платформы
         pipeline = (
-            f"udpsrc port={self.video_port} ! "
+            f"udpsrc port={self.video_port} buffer-size=65536 ! "
             f"application/x-rtp,encoding-name=H264,payload=96 ! "
             f"rtph264depay ! "
             f"h264parse ! "
             f"avdec_h264 ! "
             f"videoconvert ! "
-            f"autovideosink sync=false"
+            f"autovideosink sync=false drop-on-latency=true max-lateness=-1"
         )
         
         return pipeline
@@ -289,12 +295,37 @@ class VideoStreamClient:
     def stop(self):
         """Останавливает клиент"""
         if self.process:
-            self.process.terminate()
             try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-            print("Клиент остановлен")
+                # Сначала пытаемся корректно завершить процесс
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    # Если процесс не завершился, принудительно убиваем
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+            except (ProcessLookupError, ValueError):
+                # Процесс уже завершен
+                pass
+            except Exception as e:
+                # В случае любой другой ошибки пытаемся убить процесс
+                try:
+                    self.process.kill()
+                except:
+                    pass
+            finally:
+                self.process = None
+        
+        print("Клиент остановлен")
+    
+    def __enter__(self):
+        """Контекстный менеджер: вход"""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Контекстный менеджер: выход - автоматическое завершение"""
+        self.stop()
+        return False
 
 def main():
     parser = argparse.ArgumentParser(
@@ -337,6 +368,9 @@ def main():
         auto_discover=auto_discover
     )
     
+    # Регистрируем автоматическое завершение при выходе из программы
+    atexit.register(client.stop)
+    
     # Обработка сигналов для корректного завершения
     def signal_handler(sig, frame):
         client.stop()
@@ -347,12 +381,18 @@ def main():
         signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
+    # Используем контекстный менеджер для гарантированного завершения
     try:
-        client.start()
+        with client:
+            client.start()
+    except KeyboardInterrupt:
+        # Ctrl+C уже обрабатывается в signal_handler, но на всякий случай
+        client.stop()
     except Exception as e:
         print(f"Критическая ошибка: {e}")
         import traceback
         traceback.print_exc()
+        client.stop()
         sys.exit(1)
 
 if __name__ == '__main__':

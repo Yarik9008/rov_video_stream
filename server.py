@@ -17,6 +17,7 @@ import shutil
 import socket
 import json
 import time
+import atexit
 from pathlib import Path
 
 def find_gstreamer():
@@ -197,12 +198,28 @@ class VideoStreamServer:
     # Порт для UDP broadcast обнаружения
     DISCOVERY_PORT = 5003
     
-    def __init__(self, source='webcam', file_path=None, host='127.0.0.1', port=5000, 
+    def __init__(self, source='webcam', file_path=None, host=None, port=5000, 
                  video_port=5004, audio_port=5006, width=640, height=480, fps=30, device_index=0,
-                 enable_discovery=True):
+                 enable_discovery=True, bitrate=2000):
         self.source = source
         self.file_path = file_path
-        self.host = host
+        
+        # Автоматически определяем локальный IP для трансляции в сети
+        if host is None:
+            local_ip = get_local_ip()
+            if local_ip and local_ip != '127.0.0.1':
+                self.host = '0.0.0.0'  # Слушаем на всех интерфейсах
+                self.local_ip = local_ip  # Сохраняем локальный IP для отображения
+            else:
+                self.host = '127.0.0.1'
+                self.local_ip = '127.0.0.1'
+        else:
+            self.host = host
+            if host == '0.0.0.0':
+                self.local_ip = get_local_ip()
+            else:
+                self.local_ip = host
+        
         self.port = port
         self.video_port = video_port
         self.audio_port = audio_port
@@ -210,9 +227,14 @@ class VideoStreamServer:
         self.height = height
         self.fps = fps
         self.device_index = device_index
+        self.bitrate = bitrate
         self.process = None
         self.system = platform.system()
-        self.enable_discovery = enable_discovery
+        # Автоматически включаем обнаружение если не localhost
+        if self.host not in ('127.0.0.1', 'localhost'):
+            self.enable_discovery = enable_discovery
+        else:
+            self.enable_discovery = False
         self.discovery_socket = None
         self.discovery_thread = None
         self.running = False
@@ -223,8 +245,9 @@ class VideoStreamServer:
             # Захват с веб-камеры (кроссплатформенный)
             if self.system == 'Windows':
                 # Windows использует mfvideosrc (Media Foundation)
+                # do-timestamp=true: использовать временные метки для синхронизации
                 source_pipeline = (
-                    f"mfvideosrc device-index={self.device_index} ! "
+                    f"mfvideosrc device-index={self.device_index} do-timestamp=true ! "
                     f"video/x-raw ! "
                     f"videoconvert ! "
                     f"videoscale ! "
@@ -232,8 +255,9 @@ class VideoStreamServer:
                 )
             elif self.system == 'Darwin':
                 # macOS использует avfvideosrc (AVFoundation)
+                # do-timestamp=true: использовать временные метки для синхронизации
                 source_pipeline = (
-                    f"avfvideosrc device-index={self.device_index} ! "
+                    f"avfvideosrc device-index={self.device_index} do-timestamp=true ! "
                     f"video/x-raw ! "
                     f"videoconvert ! "
                     f"videoscale ! "
@@ -241,9 +265,10 @@ class VideoStreamServer:
                 )
             else:
                 # Linux использует v4l2src
+                # io-mode=2: режим памяти для уменьшения задержки
                 device = f"/dev/video{self.device_index}" if self.device_index > 0 else "/dev/video0"
                 source_pipeline = (
-                    f"v4l2src device={device} ! "
+                    f"v4l2src device={device} io-mode=2 do-timestamp=true ! "
                     f"video/x-raw,width={self.width},height={self.height},framerate={self.fps}/1 ! "
                 )
         elif self.source == 'file':
@@ -272,17 +297,28 @@ class VideoStreamServer:
         
         # Определяем адрес для отправки видео
         # Если host = '0.0.0.0', используем broadcast адрес для отправки на все интерфейсы
+        # Это позволяет клиентам подключаться с любого IP в локальной сети
         video_host = self.host
         if self.host == '0.0.0.0':
-            local_ip = get_local_ip()
-            video_host = get_broadcast_address(local_ip)
+            # Используем broadcast для отправки на все интерфейсы локальной сети
+            video_host = get_broadcast_address(self.local_ip)
         
         # Кодирование и отправка через RTP
+        # Оптимизированные настройки для минимальной задержки:
+        # - tune=zerolatency: минимальная задержка
+        # - key-int-max=30: ключевые кадры каждые 30 кадров
+        # - threads=4: многопоточное кодирование
+        # - sliced-threads=true: параллельная обработка срезов
+        # - bframes=0: без B-кадров для уменьшения задержки
+        # - byte-stream=true: потоковый режим
+        # - aud=false: без аудио заголовков
         pipeline = (
             source_pipeline +
-            f"x264enc tune=zerolatency bitrate=500 speed-preset=ultrafast ! "
-            f"rtph264pay config-interval=1 pt=96 ! "
-            f"udpsink host={video_host} port={self.video_port}"
+            f"x264enc tune=zerolatency bitrate={self.bitrate} speed-preset=ultrafast "
+            f"key-int-max=30 threads=4 sliced-threads=true bframes=0 "
+            f"byte-stream=true aud=false ! "
+            f"rtph264pay config-interval=1 pt=96 mtu=1400 ! "
+            f"udpsink host={video_host} port={self.video_port} buffer-size=65536 sync=false"
         )
         
         return pipeline
@@ -340,6 +376,8 @@ class VideoStreamServer:
     
     def start(self):
         """Запускает сервер"""
+        self.running = True
+        
         pipeline = self.build_pipeline()
         gst_cmd = find_gstreamer()
         if not gst_cmd:
@@ -352,26 +390,28 @@ class VideoStreamServer:
             print(f"Устройство: индекс {self.device_index}")
         elif self.source == 'file':
             print(f"Файл: {self.file_path}")
-        print(f"Адрес: {self.host}:{self.video_port}")
+        print(f"Локальный IP: {self.local_ip}")
+        print(f"Порт: {self.video_port}")
         print(f"Разрешение: {self.width}x{self.height} @ {self.fps} fps")
+        print(f"Битрейт: {self.bitrate} kbps")
         
         # Запускаем сервис обнаружения
         # Включаем, если host не localhost и не 127.0.0.1
-        if self.enable_discovery and self.host not in ('127.0.0.1', 'localhost'):
-            # Если host = '0.0.0.0', используем локальный IP для broadcast
-            if self.host == '0.0.0.0':
-                local_ip = get_local_ip()
-                # Обновляем host для отправки видео на локальный IP
-                # Но для GStreamer pipeline оставляем 0.0.0.0 (будет отправлять на все интерфейсы)
-                # На самом деле для udpsink нужно указать конкретный IP или использовать 0.0.0.0
-                # Но для broadcast discovery используем локальный IP
-            else:
-                local_ip = self.host
-            
+        if self.enable_discovery:
             self.start_discovery()
             print(f"Автообнаружение: включено (broadcast на порт {self.DISCOVERY_PORT})")
-            print(f"Локальный IP: {get_local_ip()}")
         
+        print(f"\n{'='*60}")
+        print(f"Сервер готов к трансляции!")
+        if self.host != '127.0.0.1':
+            print(f"\nДля подключения с другого компьютера:")
+            print(f"  python client.py --host {self.local_ip} --port {self.video_port}")
+            print(f"\nИли используйте автообнаружение:")
+            print(f"  python client.py")
+        else:
+            print(f"\nДля подключения локально:")
+            print(f"  python client.py --host {self.local_ip} --port {self.video_port}")
+        print(f"{'='*60}")
         print(f"\nКоманда GStreamer:")
         print(f"{gst_cmd} -e {pipeline}")
         print("\nДля остановки нажмите Ctrl+C\n")
@@ -417,14 +457,44 @@ class VideoStreamServer:
     
     def stop(self):
         """Останавливает сервер"""
+        if not self.running:
+            return
+        
+        self.running = False
         self.stop_discovery()
+        
         if self.process:
-            self.process.terminate()
             try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-            print("Сервер остановлен")
+                # Сначала пытаемся корректно завершить процесс
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    # Если процесс не завершился, принудительно убиваем
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+            except (ProcessLookupError, ValueError):
+                # Процесс уже завершен
+                pass
+            except Exception as e:
+                # В случае любой другой ошибки пытаемся убить процесс
+                try:
+                    self.process.kill()
+                except:
+                    pass
+            finally:
+                self.process = None
+        
+        print("Сервер остановлен")
+    
+    def __enter__(self):
+        """Контекстный менеджер: вход"""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Контекстный менеджер: выход - автоматическое завершение"""
+        self.stop()
+        return False
 
 def main():
     parser = argparse.ArgumentParser(
@@ -432,28 +502,28 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры использования:
-  # Трансляция с веб-камеры (по умолчанию, только локально)
+  # Трансляция с веб-камеры (автоматически определяет IP в локальной сети)
   python server.py
-  
-  # Трансляция с автообнаружением в локальной сети
-  python server.py --host 0.0.0.0
-  
-  # Трансляция с веб-камеры на другой компьютер
-  python server.py --host 192.168.1.100 --width 1280 --height 720
   
   # Трансляция видео файла
   python server.py --source file --file video.mp4
   
+  # Трансляция с другими параметрами
+  python server.py --width 1280 --height 720 --fps 25
+  
   # Использование другой веб-камеры (Windows/macOS)
   python server.py --device 1
+  
+  # Только локальная трансляция (без сети)
+  python server.py --host 127.0.0.1
         """
     )
     parser.add_argument('--source', choices=['webcam', 'file'], default='webcam',
-                        help='Источник видео: webcam или file (по умолчанию: webcam)')
+                        help='Источник видео: webcam или file (по умолчанию: webcam, автоматически)')
     parser.add_argument('--file', type=str, default=None,
                         help='Путь к видео файлу (если source=file)')
-    parser.add_argument('--host', type=str, default='127.0.0.1',
-                        help='IP адрес для отправки (по умолчанию: 127.0.0.1)')
+    parser.add_argument('--host', type=str, default=None,
+                        help='IP адрес для отправки (по умолчанию: автоматически определяется локальный IP)')
     parser.add_argument('--port', type=int, default=5004,
                         help='Порт для видео (по умолчанию: 5004)')
     parser.add_argument('--width', type=int, default=640,
@@ -464,6 +534,8 @@ def main():
                         help='Частота кадров (по умолчанию: 30)')
     parser.add_argument('--device', type=int, default=0,
                         help='Индекс видеоустройства (по умолчанию: 0)')
+    parser.add_argument('--bitrate', type=int, default=2000,
+                        help='Битрейт видео в kbps (по умолчанию: 2000, для низкой задержки используйте 1000-3000)')
     
     args = parser.parse_args()
     
@@ -478,8 +550,12 @@ def main():
         width=args.width,
         height=args.height,
         fps=args.fps,
-        device_index=args.device
+        device_index=args.device,
+        bitrate=args.bitrate
     )
+    
+    # Регистрируем автоматическое завершение при выходе из программы
+    atexit.register(server.stop)
     
     # Обработка сигналов для корректного завершения
     def signal_handler(sig, frame):
@@ -491,12 +567,18 @@ def main():
         signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
+    # Используем контекстный менеджер для гарантированного завершения
     try:
-        server.start()
+        with server:
+            server.start()
+    except KeyboardInterrupt:
+        # Ctrl+C уже обрабатывается в signal_handler, но на всякий случай
+        server.stop()
     except Exception as e:
         print(f"Критическая ошибка: {e}")
         import traceback
         traceback.print_exc()
+        server.stop()
         sys.exit(1)
 
 if __name__ == '__main__':
