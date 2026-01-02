@@ -129,50 +129,86 @@ async def run_client(host: str, signal_port: int, stun: bool):
 
     stop_event = asyncio.Event()
     stats_text = "Delay n/a"
+    debug_printed = False
 
     async def stats_loop():
         nonlocal stats_text
         while not stop_event.is_set():
             try:
                 stats = await pc.getStats()
+                
+                # Временный отладочный вывод (один раз)
+                nonlocal debug_printed
+                if not debug_printed and len(stats) > 0:
+                    print("\n=== Отладка: Доступные stats ===")
+                    for stat_id, stat in list(stats.items())[:5]:  # Первые 5 для краткости
+                        print(f"\nStat ID: {stat_id}")
+                        print(f"  Type: {getattr(stat, 'type', 'N/A')}")
+                        # Проверяем ключевые поля
+                        for attr in ["state", "kind", "currentRoundTripTime", "totalRoundTripTime", 
+                                     "jitterBufferDelay", "jitterBufferTargetDelay", "jitterBufferEmittedCount"]:
+                            val = getattr(stat, attr, None)
+                            if val is not None:
+                                print(f"  {attr}: {val}")
+                    print("===============================\n")
+                    debug_printed = True
+                
                 rtt_ms = None
                 jb_ms = None
 
-                # Candidate-pair RTT (network)
+                # Candidate-pair RTT (network) - более гибкий поиск
                 for stat_id, stat in stats.items():
                     try:
-                        if hasattr(stat, "type") and stat.type == "candidate-pair":
-                            state = getattr(stat, "state", None)
-                            nominated = getattr(stat, "nominated", False)
-                            if state == "succeeded" and nominated:
-                                crt = getattr(stat, "currentRoundTripTime", None)
-                                if crt is not None and isinstance(crt, (int, float)) and crt > 0:
-                                    rtt_ms = int(crt * 1000)
-                    except (AttributeError, TypeError):
+                        if not hasattr(stat, "type"):
+                            continue
+                        if stat.type == "candidate-pair":
+                            # Пробуем получить RTT из разных полей
+                            for rtt_attr in ["currentRoundTripTime", "totalRoundTripTime", "roundTripTime"]:
+                                crt = getattr(stat, rtt_attr, None)
+                                if crt is not None:
+                                    try:
+                                        crt_val = float(crt)
+                                        if crt_val > 0:
+                                            rtt_ms = int(crt_val * 1000)
+                                            break
+                                    except (TypeError, ValueError):
+                                        continue
+                            if rtt_ms is not None:
+                                break
+                    except (AttributeError, TypeError, ValueError):
                         continue
 
-                # Inbound RTP jitter buffer delay (playout)
+                # Inbound RTP jitter buffer delay (playout) - более гибкий поиск
                 for stat_id, stat in stats.items():
                     try:
-                        if hasattr(stat, "type") and stat.type == "inbound-rtp":
-                            kind = getattr(stat, "kind", None)
-                            if kind == "video":
-                                # jitterBufferDelay уже в секундах (накопленное время)
-                                jbd = getattr(stat, "jitterBufferDelay", None)
-                                if jbd is not None and isinstance(jbd, (int, float)) and jbd >= 0:
-                                    # Также можно попробовать jitterBufferTargetDelay
-                                    jb_target = getattr(stat, "jitterBufferTargetDelay", None)
-                                    if jb_target is not None and isinstance(jb_target, (int, float)) and jb_target > 0:
-                                        jb_ms = int(jb_target * 1000)
-                                    else:
-                                        # Используем накопленную задержку, но делим на количество для среднего
-                                        emitted = getattr(stat, "jitterBufferEmittedCount", None)
-                                        if emitted and emitted > 0:
-                                            jb_ms = int((jbd / emitted) * 1000)
-                                        else:
-                                            jb_ms = int(jbd * 1000)
+                        if not hasattr(stat, "type"):
+                            continue
+                        if stat.type == "inbound-rtp":
+                            # Проверяем kind, но не строго
+                            kind = getattr(stat, "kind", "video")
+                            if kind == "video" or kind is None:
+                                # Пробуем разные поля для jitter buffer delay
+                                for jb_attr in ["jitterBufferTargetDelay", "jitterBufferDelay"]:
+                                    jbd_val = getattr(stat, jb_attr, None)
+                                    if jbd_val is not None:
+                                        try:
+                                            jbd_float = float(jbd_val)
+                                            if jbd_float > 0:
+                                                if jb_attr == "jitterBufferTargetDelay":
+                                                    jb_ms = int(jbd_float * 1000)
+                                                else:
+                                                    # Для jitterBufferDelay делим на emitted count если есть
+                                                    emitted = getattr(stat, "jitterBufferEmittedCount", None)
+                                                    if emitted and float(emitted) > 0:
+                                                        jb_ms = int((jbd_float / float(emitted)) * 1000)
+                                                    else:
+                                                        jb_ms = int(jbd_float * 1000)
+                                                break
+                                        except (TypeError, ValueError):
+                                            continue
+                                if jb_ms is not None:
                                     break
-                    except (AttributeError, TypeError):
+                    except (AttributeError, TypeError, ValueError):
                         continue
 
                 # Оценка задержки (ms): playout (JB) + половина RTT (в одну сторону)
