@@ -11,6 +11,7 @@ WebRTC Video Streaming Server (LAN)
 import argparse
 import asyncio
 import atexit
+import itertools
 import json
 import os
 import platform
@@ -109,63 +110,142 @@ def _lazy_imports():
     return cv2, web, RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender, VideoStreamTrack, VideoFrame
 
 
-def _make_capture_track(source: str, file_path: str, device_index: int, width: int, height: int, fps: int):
-    cv2, web, RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender, VideoStreamTrack, VideoFrame = _lazy_imports()
+def _ts() -> str:
+    """Короткий timestamp для логов."""
+    try:
+        return time.strftime("%H:%M:%S")
+    except Exception:
+        return "??:??:??"
 
-    class _Track(VideoStreamTrack):
-        def __init__(self):
-            super().__init__()
-            self._fps = max(1, int(fps))
-            # Для файла: используем target-ресайз (width/height).
-            # Для камеры: всегда отправляем в нативном разрешении (без ресайза).
-            self._target_width = int(width) if source == "file" else None
-            self._target_height = int(height) if source == "file" else None
-            self._frame_period = 1.0 / float(self._fps)
-            self._next_ts = time.time()
 
-            if source == "file":
-                if not file_path:
-                    raise ValueError("Не указан путь к файлу (используйте --file)")
-                p = str(Path(file_path).resolve())
-                if not os.path.exists(p):
-                    raise FileNotFoundError(f"Файл не найден: {p}")
-                self._cap = cv2.VideoCapture(p)
-                self._is_file = True
-            else:
-                self._cap = cv2.VideoCapture(int(device_index))
-                self._is_file = False
+def _safe_client_ip(request) -> str:
+    """Получить IP клиента из aiohttp request (учитывая прокси заголовки)."""
+    try:
+        xff = request.headers.get("X-Forwarded-For")
+        if xff:
+            # берём первый IP из списка
+            return xff.split(",")[0].strip()
+    except Exception:
+        pass
+    try:
+        return request.remote or "unknown"
+    except Exception:
+        return "unknown"
 
-            if not self._cap.isOpened():
-                raise RuntimeError("Не удалось открыть источник видео (камера/файл).")
 
-            # попытка настроить камеру (только FPS; размер не трогаем — нужен нативный)
-            if not self._is_file:
-                try:
-                    self._cap.set(cv2.CAP_PROP_FPS, self._fps)
-                except Exception:
-                    pass
-            
-        async def recv(self):
-            # pacing
+class _SharedFrameSource:
+    """
+    Общий источник кадров (камера/файл), который читает кадры в фоне и
+    хранит последний кадр. Это позволяет:
+    - множественные подключения (несколько клиентов одновременно)
+    - повторные подключения без перезапуска сервера
+    """
+
+    def __init__(self, source: str, file_path: str, device_index: int, width: int, height: int, fps: int):
+        self._source = source
+        self._file_path = file_path
+        self._device_index = int(device_index)
+        self._fps = max(1, int(fps))
+        self._target_width = int(width) if source == "file" else None
+        self._target_height = int(height) if source == "file" else None
+
+        self._lock = threading.Lock()
+        self._latest = None  # numpy array (bgr)
+        self._running = False
+        self._thread = None
+
+        self._cv2 = None
+        self._cap = None
+        self._is_file = False
+
+    def start(self):
+        if self._running:
+            return
+
+        cv2, *_rest = _lazy_imports()
+        self._cv2 = cv2
+
+        if self._source == "file":
+            if not self._file_path:
+                raise ValueError("Не указан путь к файлу (используйте --file)")
+            p = str(Path(self._file_path).resolve())
+            if not os.path.exists(p):
+                raise FileNotFoundError(f"Файл не найден: {p}")
+            self._cap = cv2.VideoCapture(p)
+            self._is_file = True
+        else:
+            self._cap = cv2.VideoCapture(int(self._device_index))
+            self._is_file = False
+
+        if not self._cap or not self._cap.isOpened():
+            raise RuntimeError("Не удалось открыть источник видео (камера/файл).")
+
+        # попытка настроить камеру (только FPS; размер не трогаем — нужен нативный)
+        if not self._is_file:
+            try:
+                self._cap.set(cv2.CAP_PROP_FPS, self._fps)
+            except Exception:
+                pass
+
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        t = self._thread
+        if t:
+            try:
+                t.join(timeout=1.0)
+            except Exception:
+                pass
+        self._thread = None
+
+        cap = self._cap
+        self._cap = None
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+    def get_latest(self):
+        with self._lock:
+            if self._latest is None:
+                return None
+            try:
+                return self._latest.copy()
+            except Exception:
+                return None
+
+    def _run(self):
+        cv2 = self._cv2
+        cap = self._cap
+        if cv2 is None or cap is None:
+            return
+
+        frame_period = 1.0 / float(self._fps)
+        next_ts = time.time()
+
+        while self._running:
+            # pacing чтения (чтобы не жечь CPU)
             now = time.time()
-            delay = self._next_ts - now
+            delay = next_ts - now
             if delay > 0:
-                await asyncio.sleep(delay)
-            self._next_ts = max(self._next_ts + self._frame_period, time.time())
+                time.sleep(delay)
+            next_ts = max(next_ts + frame_period, time.time())
 
-            pts, time_base = await self.next_timestamp()
-
-            ok, frame = self._cap.read()
+            ok, frame = cap.read()
             if not ok or frame is None:
                 if self._is_file:
                     # loop file
                     try:
-                        self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     except Exception:
                         pass
-                    ok, frame = self._cap.read()
+                    ok, frame = cap.read()
                 if not ok or frame is None:
-                    raise RuntimeError("Не удалось прочитать кадр.")
+                    continue
 
             # Ресайз применяем только для файла (если задан target size)
             if self._is_file and self._target_width and self._target_height:
@@ -179,19 +259,50 @@ def _make_capture_track(source: str, file_path: str, device_index: int, width: i
                 except Exception:
                     pass
 
+            with self._lock:
+                self._latest = frame
+
+
+def _make_capture_track(shared: _SharedFrameSource, fps: int):
+    cv2, web, RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender, VideoStreamTrack, VideoFrame = _lazy_imports()
+
+    class _Track(VideoStreamTrack):
+        def __init__(self, _shared: _SharedFrameSource):
+            super().__init__()
+            self._shared = _shared
+            self._fps = max(1, int(fps))
+            self._frame_period = 1.0 / float(self._fps)
+            self._next_ts = time.time()
+            
+        async def recv(self):
+            # pacing
+            now = time.time()
+            delay = self._next_ts - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next_ts = max(self._next_ts + self._frame_period, time.time())
+
+            pts, time_base = await self.next_timestamp()
+
+            # ждём первый кадр (камера/файл могут стартовать не сразу)
+            frame = None
+            for _ in range(200):  # ~2s с шагом 10ms
+                frame = self._shared.get_latest()
+                if frame is not None:
+                    break
+                await asyncio.sleep(0.01)
+            if frame is None:
+                raise RuntimeError("Нет кадров от источника (камера/файл).")
+
             vf = VideoFrame.from_ndarray(frame, format="bgr24")
             vf.pts = pts
             vf.time_base = time_base
             return vf
 
         def stop(self):
-            try:
-                self._cap.release()
-            except Exception:
-                pass
             super().stop()
 
-    return _Track()
+    return _Track(shared)
 
 
 def _prefer_h264(pc):
@@ -323,29 +434,77 @@ async def run_server(args):
     )
 
     pcs = set()
-    track = _make_capture_track(args.source, args.file, args.device, args.width, args.height, args.fps)
+    pc_meta = {}
+    pc_id_counter = itertools.count(1)
+    shared = _SharedFrameSource(args.source, args.file, args.device, args.width, args.height, args.fps)
+    shared.start()
 
     async def offer(request):
+        client_ip = _safe_client_ip(request)
+        user_agent = None
+        try:
+            user_agent = request.headers.get("User-Agent")
+        except Exception:
+            user_agent = None
+
         params = await request.json()
         offer_sdp = params["sdp"]
         offer_type = params["type"]
 
         pc = RTCPeerConnection(configuration=cfg)
+        pc_id = next(pc_id_counter)
         pcs.add(pc)
+        pc_meta[pc] = {
+            "id": pc_id,
+            "ip": client_ip,
+            "ua": user_agent,
+            "created": time.time(),
+            "last_conn_state": None,
+            "last_ice_state": None,
+        }
+
+        print(f"[{_ts()}] client#{pc_id} CONNECT offer from {client_ip}" + (f" | UA: {user_agent}" if user_agent else ""))
 
         @pc.on("connectionstatechange")
         async def on_state_change():
             try:
+                meta = pc_meta.get(pc, {})
+                _id = meta.get("id", "?")
+                state = getattr(pc, "connectionState", None)
+                prev = meta.get("last_conn_state")
+                if state != prev:
+                    meta["last_conn_state"] = state
+                    print(f"[{_ts()}] client#{_id} PC state: {state}")
+
                 if pc.connectionState in ("failed", "disconnected", "closed"):
                     pcs.discard(pc)
+                    ip = meta.get("ip", "unknown")
+                    print(f"[{_ts()}] client#{_id} DISCONNECT ({pc.connectionState}) from {ip}")
                     try:
                         await pc.close()
                     except Exception:
                         pass
+                    pc_meta.pop(pc, None)
+            except Exception:
+                pass
+
+        @pc.on("iceconnectionstatechange")
+        def on_ice_state_change():
+            try:
+                meta = pc_meta.get(pc, {})
+                _id = meta.get("id", "?")
+                state = getattr(pc, "iceConnectionState", None)
+                prev = meta.get("last_ice_state")
+                if state != prev:
+                    meta["last_ice_state"] = state
+                    print(f"[{_ts()}] client#{_id} ICE state: {state}")
             except Exception:
                 pass
 
         try:
+            # Важно: на каждое подключение создаём отдельный track,
+            # чтобы поддержать множественных клиентов и реконнект.
+            track = _make_capture_track(shared, args.fps)
             sender = pc.addTrack(track)
             _prefer_h264(pc)
 
@@ -356,13 +515,19 @@ async def run_server(args):
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
             await _wait_ice_complete(pc)
+
+            print(f"[{_ts()}] client#{pc_id} ANSWER ready (pc={pc.connectionState}, ice={pc.iceConnectionState})")
             return web.json_response({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
         except Exception as e:
             pcs.discard(pc)
+            meta = pc_meta.pop(pc, {})
+            _id = meta.get("id", pc_id)
+            ip = meta.get("ip", client_ip)
             try:
                 await pc.close()
             except Exception:
                 pass
+            print(f"[{_ts()}] client#{_id} ERROR during setup from {ip}: {e}")
             raise web.HTTPInternalServerError(text=f"Ошибка установки соединения: {e}")
 
     async def index(_request):
@@ -427,7 +592,13 @@ async def run_server(args):
     finally:
         broadcaster.stop()
         try:
-            track.stop()
+            shared.stop()
+        except Exception:
+            pass
+        try:
+            alive = len(pcs)
+            if alive:
+                print(f"[{_ts()}] shutdown: closing {alive} active client(s)")
         except Exception:
             pass
         coros = [pc.close() for pc in pcs]

@@ -23,11 +23,13 @@ try:
     from PyQt6.QtGui import QImage, QPixmap
     from PyQt6.QtWidgets import (
         QApplication,
+        QCheckBox,
         QLabel,
         QMainWindow,
         QPushButton,
         QVBoxLayout,
         QHBoxLayout,
+        QSizePolicy,
         QWidget,
         QMessageBox,
         QLineEdit,
@@ -40,11 +42,13 @@ except ImportError:
         from PyQt5.QtGui import QImage, QPixmap
         from PyQt5.QtWidgets import (
             QApplication,
+            QCheckBox,
             QLabel,
             QMainWindow,
             QPushButton,
             QVBoxLayout,
             QHBoxLayout,
+            QSizePolicy,
             QWidget,
             QMessageBox,
             QLineEdit,
@@ -325,6 +329,10 @@ class VideoWidget(QLabel):
     def __init__(self):
         super().__init__()
         self._last_frame_bytes: Optional[bytes] = None
+        self._last_w: int = 0
+        self._last_h: int = 0
+        self._fit_to_window: bool = True
+        self._hq_scaling: bool = True
         self.setText("Ожидание видео...")
         if PYQT6:
             self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -332,6 +340,16 @@ class VideoWidget(QLabel):
             self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet("background-color: black; color: white; font-size: 16px;")
         self.setMinimumSize(640, 480)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding if PYQT6 else QSizePolicy.Expanding,
+                           QSizePolicy.Policy.Expanding if PYQT6 else QSizePolicy.Expanding)
+
+    def set_fit_to_window(self, enabled: bool):
+        self._fit_to_window = bool(enabled)
+        self.redraw_last()
+
+    def set_hq_scaling(self, enabled: bool):
+        self._hq_scaling = bool(enabled)
+        self.redraw_last()
 
     def update_frame(self, frame_data):
         """Обновляет изображение из bytes данных (RGB формат)."""
@@ -346,6 +364,8 @@ class VideoWidget(QLabel):
             # Важно: QImage(bytes, ...) НЕ владеет памятью и не копирует буфер.
             # Держим ссылку на bytes до следующего кадра + делаем copy() для гарантии.
             self._last_frame_bytes = img_bytes
+            self._last_w = int(width)
+            self._last_h = int(height)
 
             bytes_per_line = 3 * width
             
@@ -364,19 +384,20 @@ class VideoWidget(QLabel):
             
             # Масштабируем с сохранением пропорций только если виджет имеет размер
             widget_size = self.size()
+            if not self._fit_to_window:
+                # 1:1 (без ухудшения качества из-за масштабирования)
+                self.setPixmap(pixmap)
+                return
+
             if widget_size.width() > 0 and widget_size.height() > 0:
                 if PYQT6:
-                    scaled_pixmap = pixmap.scaled(
-                        widget_size, 
-                        Qt.AspectRatioMode.KeepAspectRatio, 
-                        Qt.TransformationMode.SmoothTransformation
-                    )
+                    aspect = Qt.AspectRatioMode.KeepAspectRatio
+                    transform = Qt.TransformationMode.SmoothTransformation if self._hq_scaling else Qt.TransformationMode.FastTransformation
                 else:
-                    scaled_pixmap = pixmap.scaled(
-                        widget_size, 
-                        Qt.KeepAspectRatio, 
-                        Qt.SmoothTransformation
-                    )
+                    aspect = Qt.KeepAspectRatio
+                    transform = Qt.SmoothTransformation if self._hq_scaling else Qt.FastTransformation
+
+                scaled_pixmap = pixmap.scaled(widget_size, aspect, transform)
                 self.setPixmap(scaled_pixmap)
             else:
                 # Если виджет еще не имеет размера, просто устанавливаем pixmap без масштабирования
@@ -386,6 +407,11 @@ class VideoWidget(QLabel):
             import traceback
             traceback.print_exc()
 
+    def redraw_last(self):
+        """Перерисовать последний кадр (например, после ресайза окна)."""
+        if self._last_frame_bytes and self._last_w > 0 and self._last_h > 0:
+            self.update_frame((self._last_frame_bytes, self._last_w, self._last_h))
+
 
 class MainWindow(QMainWindow):
     """Главное окно приложения."""
@@ -394,12 +420,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.client_thread: Optional[WebRTCClientThread] = None
         self._discover_thread: Optional[DiscoverThread] = None
+        self._first_frame_seen: bool = False
         self.init_ui()
 
     def init_ui(self):
         """Инициализация UI."""
         self.setWindowTitle("WebRTC Video Stream Client")
-        self.setMinimumSize(800, 600)
+        # Окно должно быть растягиваемым; минимальный размер делаем умеренным
+        self.setMinimumSize(520, 420)
 
         # Центральный виджет
         central_widget = QWidget()
@@ -425,6 +453,15 @@ class MainWindow(QMainWindow):
         
         self.discover_btn = QPushButton("Найти сервер")
         self.discover_btn.clicked.connect(self.discover_server)
+
+        # Качество отображения (клиент-side)
+        self.fit_cb = QCheckBox("Fit")
+        self.fit_cb.setChecked(True)
+        self.fit_cb.toggled.connect(self.video_widget.set_fit_to_window)
+
+        self.hq_cb = QCheckBox("HQ")
+        self.hq_cb.setChecked(True)
+        self.hq_cb.toggled.connect(self.video_widget.set_hq_scaling)
         
         control_layout.addWidget(QLabel("Хост:"))
         control_layout.addWidget(self.host_edit)
@@ -432,6 +469,8 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.port_edit)
         control_layout.addWidget(self.discover_btn)
         control_layout.addWidget(self.connect_btn)
+        control_layout.addWidget(self.fit_cb)
+        control_layout.addWidget(self.hq_cb)
         
         main_layout.addLayout(control_layout)
 
@@ -443,6 +482,52 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Готов к подключению")
         self.status_label.setStyleSheet("padding: 5px; background-color: #f0f0f0;")
         main_layout.addWidget(self.status_label)
+
+    def _fit_window_to_video(self, video_w: int, video_h: int):
+        """Подогнать стартовый размер окна под разрешение видео (с ограничением по экрану)."""
+        try:
+            video_w = int(video_w)
+            video_h = int(video_h)
+            if video_w <= 0 or video_h <= 0:
+                return
+
+            screen = QApplication.primaryScreen()
+            if screen is None:
+                return
+            geom = screen.availableGeometry()
+            max_w = int(geom.width() * 0.9)
+            max_h = int(geom.height() * 0.9)
+
+            # запас под панель управления + статус
+            chrome_h = 140
+            chrome_w = 60
+
+            scale = min(max_w / float(video_w + chrome_w), max_h / float(video_h + chrome_h), 1.0)
+            target_w = int(video_w * scale + chrome_w)
+            target_h = int(video_h * scale + chrome_h)
+
+            self.resize(max(self.minimumWidth(), target_w), max(self.minimumHeight(), target_h))
+        except Exception:
+            pass
+
+    def on_frame(self, frame_data):
+        """Промежуточный слот: первый кадр → подгоняем окно, потом рисуем."""
+        try:
+            if (not self._first_frame_seen) and isinstance(frame_data, tuple) and len(frame_data) == 3:
+                _bytes, w, h = frame_data
+                self._fit_window_to_video(int(w), int(h))
+                self._first_frame_seen = True
+        except Exception:
+            pass
+        self.video_widget.update_frame(frame_data)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Перерисовать последний кадр под новый размер окна
+        try:
+            self.video_widget.redraw_last()
+        except Exception:
+            pass
 
     def discover_server(self):
         """Поиск сервера в локальной сети."""
@@ -519,8 +604,9 @@ class MainWindow(QMainWindow):
         if self.client_thread and self.client_thread.isRunning():
             return
 
+        self._first_frame_seen = False
         self.client_thread = WebRTCClientThread(host, signal_port, stun)
-        self.client_thread.frame_received.connect(self.video_widget.update_frame)
+        self.client_thread.frame_received.connect(self.on_frame)
         self.client_thread.status_changed.connect(self.status_label.setText)
         self.client_thread.error_occurred.connect(self.on_error)
         self.client_thread.finished.connect(self.on_client_finished)
@@ -574,6 +660,14 @@ def main():
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
+    # HiDPI: более четкие pixmap'ы (если поддерживается)
+    try:
+        if PYQT6:
+            app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+        else:
+            app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
     app.setStyle("Fusion")  # Современный стиль
     
     window = MainWindow()
