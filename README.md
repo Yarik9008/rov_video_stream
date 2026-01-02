@@ -46,6 +46,15 @@ python3 server.py --host 0.0.0.0 --signal-port 8080
 
 Если `GstWebRTC-1.0.typelib` отсутствует, `server_gst.py/client_gst.py` не смогут делать offer/answer/ICE.
 
+Проверка (должно вывести `OK`):
+
+```bash
+python -c "import sys; sys.path.insert(0, r'C:\Program Files\GStreamer\1.0\msvc_x86_64\lib\site-packages'); import gi; gi.require_version('GstWebRTC','1.0'); from gi.repository import GstWebRTC; print('OK')"
+```
+
+Если падает `Namespace GstWebRTC not available`, значит в вашей сборке не установлены typelibs WebRTC.
+Обычно помогает установка *Development* пакетов GStreamer, особенно для `-bad` (WebRTC относится к `gst-plugins-bad`).
+
 Важно: в официальной сборке GStreamer Python bindings (`gi`) лежат внутри:
 
 `C:\Program Files\GStreamer\1.0\msvc_x86_64\lib\site-packages`

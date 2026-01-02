@@ -115,7 +115,8 @@ def discover_server(timeout: int = 5, logger: Optional[Logger] = None) -> Option
                 info["host"] = addr[0]
                 sock.close()
                 if logger:
-                    logger.info(f"✓ Сервер найден: {info.get('host')}:{info.get('signal_port')}", source="client_gst")
+                    # В Windows консоль часто в cp1251 — символ '✓' ломает логирование (UnicodeEncodeError).
+                    logger.info(f"[OK] Сервер найден: {info.get('host')}:{info.get('signal_port')}", source="client_gst")
                 return info
             except socket.timeout:
                 continue
