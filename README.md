@@ -22,6 +22,12 @@ pip install -r requirements.txt
 python3 server.py --host 0.0.0.0 --signal-port 8080
 ```
 
+Для более высокого качества поднимайте разрешение и битрейт, например:
+
+```bash
+python3 server.py --host 0.0.0.0 --width 1920 --height 1080 --fps 30 --bitrate 12000
+```
+
 По умолчанию сервер шлёт broadcast на UDP порт `5003`, и клиент может найти его автоматически.
 
 ### Клиент (автообнаружение)

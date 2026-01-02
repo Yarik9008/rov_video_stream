@@ -218,6 +218,35 @@ async def _wait_ice_complete(pc):
         pass
 
 
+async def _apply_sender_quality(sender, target_bitrate_kbps: int, target_fps: int):
+    """
+    Пытаемся поднять качество через RTCRtpSender.setParameters():
+    - maxBitrate (бит/с)
+    - maxFramerate (кадры/с)
+
+    В зависимости от версии aiortc setParameters может быть корутиной.
+    """
+    try:
+        params = sender.getParameters()
+        if not getattr(params, "encodings", None):
+            return
+        if not params.encodings:
+            return
+
+        enc = params.encodings[0]
+        if target_bitrate_kbps and target_bitrate_kbps > 0:
+            enc.maxBitrate = int(target_bitrate_kbps) * 1000
+        if target_fps and target_fps > 0:
+            enc.maxFramerate = int(target_fps)
+
+        res = sender.setParameters(params)
+        if asyncio.iscoroutine(res):
+            await res
+    except Exception:
+        # Если API/кодек не поддерживает параметры — просто игнорируем
+        return
+
+
 class DiscoveryBroadcaster:
     DISCOVERY_PORT = 5003
 
@@ -305,8 +334,11 @@ async def run_server(args):
                 await pc.close()
                 pcs.discard(pc)
 
-        pc.addTrack(track)
+        sender = pc.addTrack(track)
         _prefer_h264(pc)
+
+        # Качество: попросим encoder о более высоком битрейте/фпс
+        await _apply_sender_quality(sender, int(args.bitrate), int(args.fps))
 
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type=offer_type))
         answer = await pc.createAnswer()
@@ -391,9 +423,10 @@ def main():
     parser.add_argument("--file", type=str, default=None, help="Путь к файлу (если --source file)")
     parser.add_argument("--host", type=str, default=None, help="Хост для режима LAN (обычно 0.0.0.0)")
     parser.add_argument("--signal-port", type=int, default=8080, help="Порт HTTP signaling (по умолчанию 8080)")
-    parser.add_argument("--width", type=int, default=640, help="Ширина")
-    parser.add_argument("--height", type=int, default=480, help="Высота")
+    parser.add_argument("--width", type=int, default=1920, help="Ширина")
+    parser.add_argument("--height", type=int, default=1080, help="Высота")
     parser.add_argument("--fps", type=int, default=30, help="FPS")
+    parser.add_argument("--bitrate", type=int, default=6000, help="Целевой битрейт видео (kbps), по умолчанию 6000")
     parser.add_argument("--device", type=int, default=0, help="Индекс камеры (для webcam)")
     parser.add_argument("--stun", action="store_true", default=False, help="Использовать публичный STUN (для LAN не нужно)")
 
