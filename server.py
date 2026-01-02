@@ -217,6 +217,27 @@ class _SharedFrameSource:
                 return self._latest.copy()
             except Exception:
                 return None
+    
+    def get_video_size(self):
+        """Возвращает реальные размеры видео (width, height) или None, если не определены."""
+        if self._cap is None or self._cv2 is None:
+            return None
+        try:
+            width = int(self._cap.get(self._cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self._cap.get(self._cv2.CAP_PROP_FRAME_HEIGHT))
+            if width > 0 and height > 0:
+                return (width, height)
+        except Exception:
+            pass
+        # Если не удалось получить из cap, попробуем получить из последнего кадра
+        with self._lock:
+            if self._latest is not None:
+                try:
+                    h, w = self._latest.shape[:2]
+                    return (w, h)
+                except Exception:
+                    pass
+        return None
 
     def _run(self):
         cv2 = self._cv2
@@ -542,12 +563,27 @@ async def run_server(args, logger: Logger):
     site = web.TCPSite(runner, host="0.0.0.0", port=int(args.signal_port))
     await site.start()
 
+    # Получаем реальное разрешение видео, если width или height равны 0
+    actual_width = int(args.width) if args.width > 0 else None
+    actual_height = int(args.height) if args.height > 0 else None
+    
+    if actual_width is None or actual_height is None:
+        # Пытаемся получить реальное разрешение из видео
+        video_size = shared.get_video_size()
+        if video_size:
+            actual_width = video_size[0]
+            actual_height = video_size[1]
+        else:
+            # Fallback на значения по умолчанию
+            actual_width = actual_width or 1280
+            actual_height = actual_height or 720
+    
     payload = {
         "backend": "webrtc",
         "host": local_ip,
         "signal_port": int(args.signal_port),
-        "width": int(args.width),
-        "height": int(args.height),
+        "width": actual_width,
+        "height": actual_height,
         "fps": int(args.fps),
     }
 
@@ -611,10 +647,11 @@ def main():
     parser = argparse.ArgumentParser(description="WebRTC Video Streaming Server (LAN)")
     parser.add_argument("--source", choices=["webcam", "file"], default="webcam", help="Источник видео")
     parser.add_argument("--file", type=str, default=None, help="Путь к файлу (если --source file)")
+    parser.add_argument("-t", "--test", action="store_true", default=False, help="Транслировать тестовое видео test.mp4 в исходном разрешении")
     parser.add_argument("--host", type=str, default=None, help="Хост для режима LAN (обычно 0.0.0.0)")
     parser.add_argument("--signal-port", type=int, default=8080, help="Порт HTTP signaling (по умолчанию 8080)")
-    parser.add_argument("--width", type=int, default=1280, help="Ширина (по умолчанию 1280)")
-    parser.add_argument("--height", type=int, default=720, help="Высота (по умолчанию 720)")
+    parser.add_argument("--width", type=int, default=1280, help="Ширина (по умолчанию 1280, 0 для исходного разрешения)")
+    parser.add_argument("--height", type=int, default=720, help="Высота (по умолчанию 720, 0 для исходного разрешения)")
     parser.add_argument("--fps", type=int, default=30, help="FPS")
     parser.add_argument("--bitrate", type=int, default=6000, help="Целевой битрейт видео (kbps), по умолчанию 6000")
     parser.add_argument("--device", type=int, default=0, help="Индекс камеры (для webcam)")
@@ -623,6 +660,14 @@ def main():
     parser.add_argument("--log-path", type=str, default="logs", help="Путь к папке с логами")
 
     args = parser.parse_args()
+    
+    # Обработка флага -t/--test
+    if args.test:
+        test_video_path = r"C:\Users\Yarik\Documents\soft\video_stream\video\test.mp4"
+        args.source = "file"
+        args.file = test_video_path
+        args.width = 0  # 0 означает использовать исходное разрешение
+        args.height = 0  # 0 означает использовать исходное разрешение
     
     log_level = loggingLevels.get(args.log_level, INFO)
     logger = Logger("server", args.log_path, log_level)
