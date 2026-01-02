@@ -627,8 +627,8 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         # Фиксированная высота статус-бара (минимальная = максимальная)
-        self.status_label.setMinimumHeight(30)
-        self.status_label.setMaximumHeight(30)
+        self.status_label.setMinimumHeight(15)
+        self.status_label.setMaximumHeight(15)
         # Добавляем статус в layout со stretch=0, чтобы он оставался внизу
         main_layout.addWidget(self.status_label, stretch=0)
         
