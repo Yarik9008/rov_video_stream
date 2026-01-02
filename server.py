@@ -116,8 +116,10 @@ def _make_capture_track(source: str, file_path: str, device_index: int, width: i
         def __init__(self):
             super().__init__()
             self._fps = max(1, int(fps))
-            self._width = int(width)
-            self._height = int(height)
+            # Для файла: используем target-ресайз (width/height).
+            # Для камеры: всегда отправляем в нативном разрешении (без ресайза).
+            self._target_width = int(width) if source == "file" else None
+            self._target_height = int(height) if source == "file" else None
             self._frame_period = 1.0 / float(self._fps)
             self._next_ts = time.time()
 
@@ -136,11 +138,9 @@ def _make_capture_track(source: str, file_path: str, device_index: int, width: i
             if not self._cap.isOpened():
                 raise RuntimeError("Не удалось открыть источник видео (камера/файл).")
 
-            # попытка настроить камеру
+            # попытка настроить камеру (только FPS; размер не трогаем — нужен нативный)
             if not self._is_file:
                 try:
-                    self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
-                    self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
                     self._cap.set(cv2.CAP_PROP_FPS, self._fps)
                 except Exception:
                     pass
@@ -167,12 +167,17 @@ def _make_capture_track(source: str, file_path: str, device_index: int, width: i
                 if not ok or frame is None:
                     raise RuntimeError("Не удалось прочитать кадр.")
 
-            # ensure size
-            try:
-                if frame.shape[1] != self._width or frame.shape[0] != self._height:
-                    frame = cv2.resize(frame, (self._width, self._height), interpolation=cv2.INTER_AREA)
-            except Exception:
-                pass
+            # Ресайз применяем только для файла (если задан target size)
+            if self._is_file and self._target_width and self._target_height:
+                try:
+                    if frame.shape[1] != self._target_width or frame.shape[0] != self._target_height:
+                        frame = cv2.resize(
+                            frame,
+                            (self._target_width, self._target_height),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                except Exception:
+                    pass
 
             vf = VideoFrame.from_ndarray(frame, format="bgr24")
             vf.pts = pts

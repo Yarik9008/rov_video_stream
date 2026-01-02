@@ -128,7 +128,7 @@ async def run_client(host: str, signal_port: int, stun: bool):
     _prefer_h264(transceiver)
 
     stop_event = asyncio.Event()
-    stats_text = "RTT: n/a"
+    stats_text = "Delay n/a"
 
     async def stats_loop():
         nonlocal stats_text
@@ -156,12 +156,25 @@ async def run_client(host: str, signal_port: int, stun: bool):
                             jb_ms = int((delay / emitted) * 1000)
                             break
 
-                parts = []
-                if rtt_ms is not None:
-                    parts.append(f"RTT {rtt_ms} ms")
-                if jb_ms is not None:
-                    parts.append(f"JB {jb_ms} ms")
-                stats_text = " | ".join(parts) if parts else "RTT/JB n/a"
+                # Оценка задержки (ms): playout (JB) + половина RTT (в одну сторону)
+                delay_est_ms = None
+                if rtt_ms is not None and jb_ms is not None:
+                    delay_est_ms = int(jb_ms + (rtt_ms / 2.0))
+                elif jb_ms is not None:
+                    delay_est_ms = int(jb_ms)
+                elif rtt_ms is not None:
+                    delay_est_ms = int(rtt_ms / 2.0)
+
+                if delay_est_ms is None:
+                    stats_text = "Delay n/a"
+                else:
+                    details = []
+                    if rtt_ms is not None:
+                        details.append(f"RTT {rtt_ms} ms")
+                    if jb_ms is not None:
+                        details.append(f"JB {jb_ms} ms")
+                    suffix = f" ({' | '.join(details)})" if details else ""
+                    stats_text = f"Delay {delay_est_ms} ms{suffix}"
             except Exception:
                 pass
             await asyncio.sleep(0.5)
