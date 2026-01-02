@@ -146,8 +146,10 @@ class _SharedFrameSource:
         self._file_path = file_path
         self._device_index = int(device_index)
         self._fps = max(1, int(fps))
-        self._target_width = int(width) if source == "file" else None
-        self._target_height = int(height) if source == "file" else None
+        # Всегда считаем target size (и для файла, и для камеры):
+        # если камера игнорирует CAP_PROP_* — будем ресайзить кадр программно.
+        self._target_width = int(width) if width else None
+        self._target_height = int(height) if height else None
 
         self._lock = threading.Lock()
         self._latest = None  # numpy array (bgr)
@@ -183,6 +185,9 @@ class _SharedFrameSource:
         # попытка настроить камеру (только FPS; размер не трогаем — нужен нативный)
         if not self._is_file:
             try:
+                if self._target_width and self._target_height:
+                    self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(self._target_width))
+                    self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self._target_height))
                 self._cap.set(cv2.CAP_PROP_FPS, self._fps)
             except Exception:
                 pass
@@ -247,8 +252,8 @@ class _SharedFrameSource:
                 if not ok or frame is None:
                     continue
 
-            # Ресайз применяем только для файла (если задан target size)
-            if self._is_file and self._target_width and self._target_height:
+            # Ресайз применяем, если задан target size (и для файла, и для камеры)
+            if self._target_width and self._target_height:
                 try:
                     if frame.shape[1] != self._target_width or frame.shape[0] != self._target_height:
                         frame = cv2.resize(
@@ -613,8 +618,8 @@ def main():
     parser.add_argument("--file", type=str, default=None, help="Путь к файлу (если --source file)")
     parser.add_argument("--host", type=str, default=None, help="Хост для режима LAN (обычно 0.0.0.0)")
     parser.add_argument("--signal-port", type=int, default=8080, help="Порт HTTP signaling (по умолчанию 8080)")
-    parser.add_argument("--width", type=int, default=1920, help="Ширина")
-    parser.add_argument("--height", type=int, default=1080, help="Высота")
+    parser.add_argument("--width", type=int, default=1280, help="Ширина (по умолчанию 1280)")
+    parser.add_argument("--height", type=int, default=720, help="Высота (по умолчанию 720)")
     parser.add_argument("--fps", type=int, default=30, help="FPS")
     parser.add_argument("--bitrate", type=int, default=6000, help="Целевой битрейт видео (kbps), по умолчанию 6000")
     parser.add_argument("--device", type=int, default=0, help="Индекс камеры (для webcam)")

@@ -69,6 +69,10 @@ except ImportError:
 
 DISCOVERY_PORT = 5003
 
+# Предполагаемое начальное разрешение видео
+DEFAULT_VIDEO_WIDTH = 1280
+DEFAULT_VIDEO_HEIGHT = 720
+
 
 def apply_dark_theme(app: QApplication):
     """Жёстко задаём тёмную тему (Fusion + QPalette)."""
@@ -614,6 +618,9 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Готов к подключению")
         self.status_label.setStyleSheet("padding: 6px; background-color: #1e1e1e; color: #dcdcdc;")
         main_layout.addWidget(self.status_label)
+        
+        # Устанавливаем начальный размер окна пропорционально предполагаемому разрешению видео
+        self._fit_window_to_video(DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT)
 
     def _fit_window_to_video(self, video_w: int, video_h: int):
         """Подогнать стартовый размер окна под разрешение видео (с ограничением по экрану)."""
