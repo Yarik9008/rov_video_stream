@@ -299,6 +299,9 @@ class WebRTCClientThread(QThread):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._pc = None
         self._stop_event: Optional[asyncio.Event] = None
+        # Throttling для обновления UI - ограничиваем частоту до 30 FPS
+        self._last_frame_time = 0.0
+        self._min_frame_interval = 1.0 / 30.0  # 30 FPS максимум для UI
 
     def run(self):
         """Запускает asyncio event loop в отдельном потоке."""
@@ -374,9 +377,17 @@ class WebRTCClientThread(QThread):
                 if self.logger:
                     self.logger.info("Video track получен", source="client_qt")
                 try:
+                    import time
                     while not self._stop_event.is_set():
                         try:
                             frame = await track.recv()
+                            
+                            # Throttling: ограничиваем частоту обновления UI до 30 FPS
+                            current_time = time.time()
+                            if current_time - self._last_frame_time < self._min_frame_interval:
+                                continue  # Пропускаем кадр, если прошло мало времени
+                            self._last_frame_time = current_time
+                            
                             img = frame.to_ndarray(format="bgr24")
                             # Конвертируем BGR (OpenCV) в RGB для Qt
                             img_rgb = img[..., ::-1]  # BGR -> RGB
@@ -520,8 +531,7 @@ class VideoWidget(QLabel):
             if q_image.isNull():
                 return
 
-            # Делаем deep copy, чтобы pixmap не зависел от внешнего буфера
-            q_image = q_image.copy()
+            # Создаём pixmap напрямую из QImage (без промежуточного copy для производительности)
             pixmap = QPixmap.fromImage(q_image)
             
             # Масштабируем на размер виджета без сохранения пропорций
