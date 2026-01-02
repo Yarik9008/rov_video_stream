@@ -767,9 +767,9 @@ def main():
     parser.add_argument("-t", "--test", action="store_true", default=False, help="Транслировать тестовое видео test.mp4 в исходном разрешении")
     parser.add_argument("--host", type=str, default=None, help="Хост для режима LAN (обычно 0.0.0.0)")
     parser.add_argument("--signal-port", type=int, default=8080, help="Порт HTTP signaling (по умолчанию 8080)")
-    # Оптимальные настройки по умолчанию: баланс качества и задержки
-    parser.add_argument("--width", type=int, default=1920, help="Ширина (по умолчанию 1920 = 1080p; 0 = исходное разрешение)")
-    parser.add_argument("--height", type=int, default=1080, help="Высота (по умолчанию 1080 = 1080p; 0 = исходное разрешение)")
+    # По умолчанию используем исходное разрешение источника
+    parser.add_argument("--width", type=int, default=0, help="Ширина (по умолчанию 0 = исходное разрешение)")
+    parser.add_argument("--height", type=int, default=0, help="Высота (по умолчанию 0 = исходное разрешение)")
     parser.add_argument("--fps", type=int, default=30, help="FPS (по умолчанию 30)")
     parser.add_argument("--bitrate", type=int, default=0, help="Битрейт в kbps (по умолчанию 0 = автоматический расчет)")
     parser.add_argument("--device", type=int, default=0, help="Индекс камеры (для webcam)")
