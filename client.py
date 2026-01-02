@@ -212,18 +212,35 @@ class VideoStreamClient:
         # Прием RTP потока и воспроизведение
         # Оптимизированные настройки для минимальной задержки:
         # - buffer-size=65536: минимальный буфер для уменьшения задержки
+        # - queue leaky=downstream: сбрасывать старые кадры при переполнении (аналог drop-on-latency)
         # - sync=false: отключение синхронизации для минимальной задержки
-        # - drop-on-latency=true: сброс кадров при задержке
-        # - max-lateness=-1: игнорировать задержку
-        # autovideosink автоматически выберет подходящий видеовыход для платформы
+        # - max-lateness=-1: игнорировать задержку (сбрасывать поздние кадры)
+        # Используем платформо-специфичные видеосинки для поддержки max-lateness
+        
+        # Выбираем видеосинк в зависимости от платформы
+        if self.system == 'Darwin':
+            # macOS: используем osxvideosink с поддержкой max-lateness
+            videosink = "osxvideosink sync=false max-lateness=-1"
+        elif self.system == 'Linux':
+            # Linux: используем ximagesink с поддержкой max-lateness
+            videosink = "ximagesink sync=false max-lateness=-1"
+        elif self.system == 'Windows':
+            # Windows: используем autovideosink (d3d11videosink может не поддерживать max-lateness)
+            # Попробуем использовать dshowvideosink или autovideosink
+            videosink = "autovideosink sync=false"
+        else:
+            # Fallback на autovideosink
+            videosink = "autovideosink sync=false"
+        
         pipeline = (
             f"udpsrc port={self.video_port} buffer-size=65536 ! "
-            f"application/x-rtp,encoding-name=H264,payload=96 ! "
-            f"rtph264depay ! "
-            f"h264parse ! "
-            f"avdec_h264 ! "
+            f"application/x-rtp,encoding-name=H265,payload=96 ! "
+            f"rtph265depay ! "
+            f"h265parse ! "
+            f"avdec_h265 ! "
             f"videoconvert ! "
-            f"autovideosink sync=false drop-on-latency=true max-lateness=-1"
+            f"queue max-size-time=0 max-size-bytes=0 leaky=downstream ! "
+            f"{videosink}"
         )
         
         return pipeline

@@ -303,21 +303,30 @@ class VideoStreamServer:
             # Используем broadcast для отправки на все интерфейсы локальной сети
             video_host = get_broadcast_address(self.local_ip)
         
-        # Кодирование и отправка через RTP
+        # Кодирование H.265 (HEVC) и отправка через RTP
+        # Используем аппаратный энкодер на macOS для лучшей производительности
         # Оптимизированные настройки для минимальной задержки:
-        # - tune=zerolatency: минимальная задержка
-        # - key-int-max=30: ключевые кадры каждые 30 кадров
-        # - threads=4: многопоточное кодирование
-        # - sliced-threads=true: параллельная обработка срезов
-        # - bframes=0: без B-кадров для уменьшения задержки
-        # - byte-stream=true: потоковый режим
-        # - aud=false: без аудио заголовков
+        if self.system == 'Darwin':
+            # macOS: используем аппаратный энкодер VideoToolbox (vtenc_h265)
+            encoder = f"vtenc_h265 bitrate={self.bitrate} realtime=true allow-frame-reordering=false"
+        elif self.system == 'Linux':
+            # Linux: используем программный x265enc
+            encoder = (
+                f"x265enc tune=zerolatency bitrate={self.bitrate} speed-preset=ultrafast "
+                f"key-int-max=30 threads=4 bframes=0"
+            )
+        else:
+            # Windows: используем x265enc
+            encoder = (
+                f"x265enc tune=zerolatency bitrate={self.bitrate} speed-preset=ultrafast "
+                f"key-int-max=30 threads=4 bframes=0"
+            )
+        
         pipeline = (
             source_pipeline +
-            f"x264enc tune=zerolatency bitrate={self.bitrate} speed-preset=ultrafast "
-            f"key-int-max=30 threads=4 sliced-threads=true bframes=0 "
-            f"byte-stream=true aud=false ! "
-            f"rtph264pay config-interval=1 pt=96 mtu=1400 ! "
+            f"{encoder} ! "
+            f"h265parse ! "
+            f"rtph265pay config-interval=1 pt=96 mtu=1400 ! "
             f"udpsink host={video_host} port={self.video_port} buffer-size=65536 sync=false"
         )
         
