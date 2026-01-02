@@ -34,6 +34,10 @@ def discover_server(timeout: int = 5):
                 server_info = json.loads(data.decode("utf-8"))
                 if server_info.get("backend") != "webrtc":
                     continue
+                # Важно: payload может содержать "не тот" IP (другая подсеть/VPN/127.0.0.1).
+                # Самый надёжный адрес сервера — это IP отправителя UDP пакета.
+                sender_ip = _addr[0]
+                server_info["host"] = sender_ip
                 sock.close()
                 print(f"✓ Сервер найден (WebRTC): {server_info.get('host')}:{server_info.get('signal_port')}")
                 return server_info
@@ -124,6 +128,45 @@ async def run_client(host: str, signal_port: int, stun: bool):
     _prefer_h264(transceiver)
 
     stop_event = asyncio.Event()
+    stats_text = "RTT: n/a"
+
+    async def stats_loop():
+        nonlocal stats_text
+        while not stop_event.is_set():
+            try:
+                stats = await pc.getStats()
+                rtt_ms = None
+                jb_ms = None
+
+                # Candidate-pair RTT (network)
+                for report in stats.values():
+                    if getattr(report, "type", None) == "candidate-pair":
+                        if getattr(report, "state", None) == "succeeded" and getattr(report, "nominated", False):
+                            crt = getattr(report, "currentRoundTripTime", None)
+                            if isinstance(crt, (int, float)) and crt >= 0:
+                                rtt_ms = int(crt * 1000)
+                                break
+
+                # Inbound RTP jitter buffer delay (playout)
+                for report in stats.values():
+                    if getattr(report, "type", None) == "inbound-rtp" and getattr(report, "kind", None) == "video":
+                        emitted = getattr(report, "jitterBufferEmittedCount", 0) or 0
+                        delay = getattr(report, "jitterBufferDelay", None)
+                        if emitted and isinstance(delay, (int, float)) and delay >= 0:
+                            jb_ms = int((delay / emitted) * 1000)
+                            break
+
+                parts = []
+                if rtt_ms is not None:
+                    parts.append(f"RTT {rtt_ms} ms")
+                if jb_ms is not None:
+                    parts.append(f"JB {jb_ms} ms")
+                stats_text = " | ".join(parts) if parts else "RTT/JB n/a"
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+    asyncio.create_task(stats_loop())
 
     @pc.on("track")
     def on_track(track):
@@ -134,6 +177,27 @@ async def run_client(host: str, signal_port: int, stun: bool):
             while True:
                 frame = await track.recv()
                 img = frame.to_ndarray(format="bgr24")
+
+                # Overlay latency in the top-right corner
+                try:
+                    text = stats_text
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    scale = 0.6
+                    thickness = 2
+                    (tw, th), base = cv2.getTextSize(text, font, scale, thickness)
+                    x = max(8, int(img.shape[1]) - tw - 12)
+                    y = 10 + th
+                    cv2.rectangle(
+                        img,
+                        (x - 6, y - th - base - 6),
+                        (x + tw + 6, y + base + 6),
+                        (0, 0, 0),
+                        -1,
+                    )
+                    cv2.putText(img, text, (x, y), font, scale, (0, 255, 0), thickness, cv2.LINE_AA)
+                except Exception:
+                    pass
+
                 cv2.imshow("WebRTC Video", img)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q") or key == 27:
