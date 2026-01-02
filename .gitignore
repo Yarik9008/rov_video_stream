@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -45,3 +45,10 @@ desktop.ini
 *.mp4
 *.avi
 *.mov
+
+# Build artifacts
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
