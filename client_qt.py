@@ -622,7 +622,13 @@ class MainWindow(QMainWindow):
         # Статус
         self.status_label = QLabel("Готов к подключению")
         self.status_label.setStyleSheet("padding: 6px; background-color: #1e1e1e; color: #dcdcdc;")
-        main_layout.addWidget(self.status_label)
+        # Устанавливаем политику размера, чтобы статус всегда оставался внизу и не сжимался
+        if PYQT6:
+            self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        else:
+            self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.status_label.setMinimumHeight(30)  # Минимальная высота для статус-бара
+        main_layout.addWidget(self.status_label, stretch=0)
         
         # Устанавливаем начальный размер окна пропорционально предполагаемому разрешению видео
         self._fit_window_to_video(DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT)
