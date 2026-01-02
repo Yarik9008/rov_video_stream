@@ -128,6 +128,21 @@ async def run_client(host: str, signal_port: int, stun: bool):
     _prefer_h264(transceiver)
 
     stop_event = asyncio.Event()
+    
+    # Создаём окно заранее для гарантии отображения
+    window_name = "WebRTC Video"
+    try:
+        cv2.destroyWindow(window_name)  # Закрываем, если уже существует
+    except:
+        pass
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 1280, 720)
+    # Показываем черный экран, чтобы окно появилось сразу
+    import numpy as np
+    blank_img = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cv2.putText(blank_img, "Подключение...", (50, 360), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
+    cv2.imshow(window_name, blank_img)
+    cv2.waitKey(1)  # Обновляем окно
 
     @pc.on("track")
     def on_track(track):
@@ -138,7 +153,7 @@ async def run_client(host: str, signal_port: int, stun: bool):
             while True:
                 frame = await track.recv()
                 img = frame.to_ndarray(format="bgr24")
-                cv2.imshow("WebRTC Video", img)
+                cv2.imshow(window_name, img)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q") or key == 27:
                     stop_event.set()
@@ -164,6 +179,7 @@ async def run_client(host: str, signal_port: int, stun: bool):
 
     await pc.close()
     try:
+        cv2.destroyWindow(window_name)
         cv2.destroyAllWindows()
     except Exception:
         pass
