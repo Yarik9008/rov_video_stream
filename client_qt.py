@@ -452,6 +452,7 @@ class VideoWidget(QLabel):
         self._last_h: int = 0
         self._fit_to_window: bool = True
         self._hq_scaling: bool = True
+        self._denoise_enabled: bool = False
         self.setText("Ожидание видео...")
         if PYQT6:
             self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -470,6 +471,10 @@ class VideoWidget(QLabel):
         self._hq_scaling = bool(enabled)
         self.redraw_last()
 
+    def set_denoise(self, enabled: bool):
+        self._denoise_enabled = bool(enabled)
+        self.redraw_last()
+
     def update_frame(self, frame_data):
         """Обновляет изображение из bytes данных (RGB формат)."""
         try:
@@ -479,6 +484,21 @@ class VideoWidget(QLabel):
             
             if not isinstance(img_bytes, bytes) or width <= 0 or height <= 0:
                 return
+            
+            # Применяем фильтрацию шума, если включена
+            if self._denoise_enabled:
+                try:
+                    import numpy as np
+                    import cv2
+                    # Конвертируем bytes обратно в numpy массив (RGB)
+                    img_array = np.frombuffer(img_bytes, dtype=np.uint8).reshape((height, width, 3))
+                    # Применяем bilateral filter для удаления зернистости (сохраняет края)
+                    img_filtered = cv2.bilateralFilter(img_array, d=9, sigmaColor=75, sigmaSpace=75)
+                    # Конвертируем обратно в bytes
+                    img_bytes = np.ascontiguousarray(img_filtered, dtype=np.uint8).tobytes()
+                except Exception as e:
+                    # Если фильтрация не удалась, используем оригинальные данные
+                    print(f"Ошибка фильтрации шума: {e}")
             
             # Важно: QImage(bytes, ...) НЕ владеет памятью и не копирует буфер.
             # Держим ссылку на bytes до следующего кадра + делаем copy() для гарантии.
@@ -510,10 +530,10 @@ class VideoWidget(QLabel):
 
             if widget_size.width() > 0 and widget_size.height() > 0:
                 if PYQT6:
-                    aspect = Qt.AspectRatioMode.KeepAspectRatio
+                    aspect = Qt.AspectRatioMode.IgnoreAspectRatio
                     transform = Qt.TransformationMode.SmoothTransformation if self._hq_scaling else Qt.TransformationMode.FastTransformation
                 else:
-                    aspect = Qt.KeepAspectRatio
+                    aspect = Qt.IgnoreAspectRatio
                     transform = Qt.SmoothTransformation if self._hq_scaling else Qt.FastTransformation
 
                 scaled_pixmap = pixmap.scaled(widget_size, aspect, transform)
@@ -592,6 +612,12 @@ class MainWindow(QMainWindow):
         self.hq_cb.setChecked(True)
         self.hq_cb.toggled.connect(self.video_widget.set_hq_scaling)
 
+        # Фильтрация шума (клиент-side)
+        self.denoise_cb = QCheckBox("Denoise")
+        self.denoise_cb.setChecked(False)
+        self.denoise_cb.setToolTip("Фильтрация зернистости изображения")
+        self.denoise_cb.toggled.connect(self.video_widget.set_denoise)
+
         # Запись (клиент-side)
         self.rec_btn = QPushButton("REC")
         self.rec_btn.setCheckable(True)
@@ -610,6 +636,7 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.connect_btn)
         control_layout.addWidget(self.fit_cb)
         control_layout.addWidget(self.hq_cb)
+        control_layout.addWidget(self.denoise_cb)
         control_layout.addWidget(self.rec_btn)
         
         main_layout.addLayout(control_layout)
