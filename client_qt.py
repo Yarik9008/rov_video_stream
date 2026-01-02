@@ -556,6 +556,9 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout()
         central_widget.setLayout(main_layout)
 
+        # Виджет видео (создаём ДО подключения сигналов чекбоксов)
+        self.video_widget = VideoWidget()
+
         # Панель управления
         control_layout = QHBoxLayout()
         
@@ -604,8 +607,7 @@ class MainWindow(QMainWindow):
         
         main_layout.addLayout(control_layout)
 
-        # Виджет видео
-        self.video_widget = VideoWidget()
+        # Видео
         main_layout.addWidget(self.video_widget, stretch=1)
 
         # Статус
