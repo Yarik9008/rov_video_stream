@@ -18,6 +18,9 @@ import threading
 import time
 from datetime import datetime
 from typing import Optional
+from logging import INFO
+
+from Logger import Logger, loggingLevels
 
 PYQT6 = False
 try:
@@ -185,7 +188,7 @@ class Mp4Recorder:
                 continue
 
 
-def discover_server(timeout: int = 5):
+def discover_server(timeout: int = 5, logger: Logger = None):
     """Автоматически находит WebRTC сервер через UDP broadcast."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -203,6 +206,8 @@ def discover_server(timeout: int = 5):
                 sender_ip = _addr[0]
                 server_info["host"] = sender_ip
                 sock.close()
+                if logger:
+                    logger.info(f"Сервер найден (WebRTC): {server_info.get('host')}:{server_info.get('signal_port')}", source="client_qt")
                 return server_info
             except socket.timeout:
                 continue
@@ -285,11 +290,12 @@ class WebRTCClientThread(QThread):
     status_changed = pyqtSignal(str)  # статус соединения
     error_occurred = pyqtSignal(str)  # ошибка
 
-    def __init__(self, host: str, signal_port: int, stun: bool):
+    def __init__(self, host: str, signal_port: int, stun: bool, logger: Logger = None):
         super().__init__()
         self.host = host
         self.signal_port = signal_port
         self.stun = stun
+        self.logger = logger
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._pc = None
         self._stop_event: Optional[asyncio.Event] = None
@@ -318,10 +324,15 @@ class WebRTCClientThread(QThread):
         aiohttp, np, RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender = _lazy_imports()
 
         if str(self.host).lower() == "auto":
-            self.error_occurred.emit("Host='auto' недопустим здесь. Используйте автообнаружение из GUI (кнопка/--auto).")
+            error_msg = "Host='auto' недопустим здесь. Используйте автообнаружение из GUI (кнопка/--auto)."
+            if self.logger:
+                self.logger.error(error_msg, source="client_qt")
+            self.error_occurred.emit(error_msg)
             return
 
         self.status_changed.emit("Подключение...")
+        if self.logger:
+            self.logger.info(f"Подключение к {self.host}:{self.signal_port}", source="client_qt")
         
         cfg = RTCConfiguration(
             iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])] if self.stun else []
@@ -331,14 +342,20 @@ class WebRTCClientThread(QThread):
         @self._pc.on("iceconnectionstatechange")
         def on_ice_state_change():
             try:
-                self.status_changed.emit(f"ICE: {self._pc.iceConnectionState}")
+                state = f"ICE: {self._pc.iceConnectionState}"
+                self.status_changed.emit(state)
+                if self.logger:
+                    self.logger.debug(f"ICE state: {self._pc.iceConnectionState}", source="client_qt")
             except Exception:
                 pass
 
         @self._pc.on("connectionstatechange")
         def on_conn_state_change():
             try:
-                self.status_changed.emit(f"PC: {self._pc.connectionState}")
+                state = f"PC: {self._pc.connectionState}"
+                self.status_changed.emit(state)
+                if self.logger:
+                    self.logger.info(f"Connection state: {self._pc.connectionState}", source="client_qt")
             except Exception:
                 pass
 
@@ -354,6 +371,8 @@ class WebRTCClientThread(QThread):
 
             async def consume():
                 self.status_changed.emit("Video track получен")
+                if self.logger:
+                    self.logger.info("Video track получен", source="client_qt")
                 try:
                     while not self._stop_event.is_set():
                         try:
@@ -368,13 +387,19 @@ class WebRTCClientThread(QThread):
                             self.frame_received.emit((img_bytes, img_rgb.shape[1], img_rgb.shape[0]))
                         except Exception as e:
                             if not self._stop_event.is_set():
-                                self.error_occurred.emit(f"Ошибка получения кадра: {e}")
+                                error_msg = f"Ошибка получения кадра: {e}"
+                                if self.logger:
+                                    self.logger.error(error_msg, source="client_qt")
+                                self.error_occurred.emit(error_msg)
                                 import traceback
                                 traceback.print_exc()
                             break
                 except Exception as e:
                     if not self._stop_event.is_set():
-                        self.error_occurred.emit(f"Ошибка потока: {e}")
+                        error_msg = f"Ошибка потока: {e}"
+                        if self.logger:
+                            self.logger.error(error_msg, source="client_qt")
+                        self.error_occurred.emit(error_msg)
                         import traceback
                         traceback.print_exc()
 
@@ -408,15 +433,22 @@ class WebRTCClientThread(QThread):
             await self._stop_event.wait()
 
         except Exception as e:
-            self.error_occurred.emit(f"Ошибка соединения: {e}")
+            error_msg = f"Ошибка соединения: {e}"
+            if self.logger:
+                self.logger.error(error_msg, source="client_qt")
+            self.error_occurred.emit(error_msg)
         finally:
             self.status_changed.emit("Отключение...")
+            if self.logger:
+                self.logger.info("Отключение от сервера", source="client_qt")
             try:
                 if self._pc:
                     await self._pc.close()
             except Exception:
                 pass
             self.status_changed.emit("Отключено")
+            if self.logger:
+                self.logger.info("Отключено", source="client_qt")
 
     def stop(self):
         """Останавливает клиент."""
@@ -430,13 +462,14 @@ class DiscoverThread(QThread):
     """Поток для поиска сервера (чтобы не трогать UI из threading.Thread)."""
     found = pyqtSignal(object)  # dict | None
 
-    def __init__(self, timeout: int = 5):
+    def __init__(self, timeout: int = 5, logger: Logger = None):
         super().__init__()
         self._timeout = int(timeout)
+        self.logger = logger
 
     def run(self):
         try:
-            info = discover_server(timeout=self._timeout)
+            info = discover_server(timeout=self._timeout, logger=self.logger)
         except Exception:
             info = None
         self.found.emit(info)
@@ -450,9 +483,6 @@ class VideoWidget(QLabel):
         self._last_frame_bytes: Optional[bytes] = None
         self._last_w: int = 0
         self._last_h: int = 0
-        self._fit_to_window: bool = True
-        self._hq_scaling: bool = True
-        self._denoise_enabled: bool = False
         self.setText("Ожидание видео...")
         if PYQT6:
             self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -462,18 +492,6 @@ class VideoWidget(QLabel):
         self.setMinimumSize(640, 480)
         self.setSizePolicy(QSizePolicy.Policy.Expanding if PYQT6 else QSizePolicy.Expanding,
                            QSizePolicy.Policy.Expanding if PYQT6 else QSizePolicy.Expanding)
-
-    def set_fit_to_window(self, enabled: bool):
-        self._fit_to_window = bool(enabled)
-        self.redraw_last()
-
-    def set_hq_scaling(self, enabled: bool):
-        self._hq_scaling = bool(enabled)
-        self.redraw_last()
-
-    def set_denoise(self, enabled: bool):
-        self._denoise_enabled = bool(enabled)
-        self.redraw_last()
 
     def update_frame(self, frame_data):
         """Обновляет изображение из bytes данных (RGB формат)."""
@@ -485,23 +503,7 @@ class VideoWidget(QLabel):
             if not isinstance(img_bytes, bytes) or width <= 0 or height <= 0:
                 return
             
-            # Применяем фильтрацию шума, если включена
-            if self._denoise_enabled:
-                try:
-                    import numpy as np
-                    import cv2
-                    # Конвертируем bytes обратно в numpy массив (RGB)
-                    img_array = np.frombuffer(img_bytes, dtype=np.uint8).reshape((height, width, 3))
-                    # Применяем bilateral filter для удаления зернистости (сохраняет края)
-                    img_filtered = cv2.bilateralFilter(img_array, d=9, sigmaColor=75, sigmaSpace=75)
-                    # Конвертируем обратно в bytes
-                    img_bytes = np.ascontiguousarray(img_filtered, dtype=np.uint8).tobytes()
-                except Exception as e:
-                    # Если фильтрация не удалась, используем оригинальные данные
-                    print(f"Ошибка фильтрации шума: {e}")
-            
-            # Важно: QImage(bytes, ...) НЕ владеет памятью и не копирует буфер.
-            # Держим ссылку на bytes до следующего кадра + делаем copy() для гарантии.
+            # Сохраняем ссылку на исходные данные
             self._last_frame_bytes = img_bytes
             self._last_w = int(width)
             self._last_h = int(height)
@@ -521,25 +523,15 @@ class VideoWidget(QLabel):
             q_image = q_image.copy()
             pixmap = QPixmap.fromImage(q_image)
             
-            # Масштабируем с сохранением пропорций только если виджет имеет размер
+            # Масштабируем на размер виджета без сохранения пропорций
             widget_size = self.size()
-            if not self._fit_to_window:
-                # 1:1 (без ухудшения качества из-за масштабирования)
-                self.setPixmap(pixmap)
-                return
-
             if widget_size.width() > 0 and widget_size.height() > 0:
                 if PYQT6:
-                    aspect = Qt.AspectRatioMode.IgnoreAspectRatio
-                    transform = Qt.TransformationMode.SmoothTransformation if self._hq_scaling else Qt.TransformationMode.FastTransformation
+                    scaled_pixmap = pixmap.scaled(widget_size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
                 else:
-                    aspect = Qt.IgnoreAspectRatio
-                    transform = Qt.SmoothTransformation if self._hq_scaling else Qt.FastTransformation
-
-                scaled_pixmap = pixmap.scaled(widget_size, aspect, transform)
+                    scaled_pixmap = pixmap.scaled(widget_size, Qt.IgnoreAspectRatio, Qt.FastTransformation)
                 self.setPixmap(scaled_pixmap)
             else:
-                # Если виджет еще не имеет размера, просто устанавливаем pixmap без масштабирования
                 self.setPixmap(pixmap)
         except Exception as e:
             print(f"Ошибка обновления кадра: {e}")
@@ -555,8 +547,9 @@ class VideoWidget(QLabel):
 class MainWindow(QMainWindow):
     """Главное окно приложения."""
 
-    def __init__(self):
+    def __init__(self, logger: Logger = None):
         super().__init__()
+        self.logger = logger
         self.client_thread: Optional[WebRTCClientThread] = None
         self._discover_thread: Optional[DiscoverThread] = None
         self._first_frame_seen: bool = False
@@ -603,21 +596,6 @@ class MainWindow(QMainWindow):
         self.discover_btn = QPushButton("Найти сервер")
         self.discover_btn.clicked.connect(self.discover_server)
 
-        # Качество отображения (клиент-side)
-        self.fit_cb = QCheckBox("Fit")
-        self.fit_cb.setChecked(True)
-        self.fit_cb.toggled.connect(self.video_widget.set_fit_to_window)
-
-        self.hq_cb = QCheckBox("HQ")
-        self.hq_cb.setChecked(True)
-        self.hq_cb.toggled.connect(self.video_widget.set_hq_scaling)
-
-        # Фильтрация шума (клиент-side)
-        self.denoise_cb = QCheckBox("Denoise")
-        self.denoise_cb.setChecked(False)
-        self.denoise_cb.setToolTip("Фильтрация зернистости изображения")
-        self.denoise_cb.toggled.connect(self.video_widget.set_denoise)
-
         # Запись (клиент-side)
         self.rec_btn = QPushButton("REC")
         self.rec_btn.setCheckable(True)
@@ -634,9 +612,6 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.port_edit)
         control_layout.addWidget(self.discover_btn)
         control_layout.addWidget(self.connect_btn)
-        control_layout.addWidget(self.fit_cb)
-        control_layout.addWidget(self.hq_cb)
-        control_layout.addWidget(self.denoise_cb)
         control_layout.addWidget(self.rec_btn)
         
         main_layout.addLayout(control_layout)
@@ -803,7 +778,7 @@ class MainWindow(QMainWindow):
         if self._discover_thread and self._discover_thread.isRunning():
             return
 
-        self._discover_thread = DiscoverThread(timeout=5)
+        self._discover_thread = DiscoverThread(timeout=5, logger=self.logger)
 
         def _on_found(info):
             try:
@@ -847,7 +822,7 @@ class MainWindow(QMainWindow):
             if self._discover_thread and self._discover_thread.isRunning():
                 return
 
-            self._discover_thread = DiscoverThread(timeout=5)
+            self._discover_thread = DiscoverThread(timeout=5, logger=self.logger)
 
             def _on_found(info):
                 if info:
@@ -870,7 +845,9 @@ class MainWindow(QMainWindow):
             return
 
         self._first_frame_seen = False
-        self.client_thread = WebRTCClientThread(host, signal_port, stun)
+        self.client_thread = WebRTCClientThread(host, signal_port, stun, logger=self.logger)
+        if self.logger:
+            self.logger.info(f"Запуск клиента к {host}:{signal_port}", source="client_qt")
         self.client_thread.frame_received.connect(self.on_frame)
         self.client_thread.status_changed.connect(self.status_label.setText)
         self.client_thread.error_occurred.connect(self.on_error)
@@ -885,6 +862,8 @@ class MainWindow(QMainWindow):
     def disconnect(self):
         """Отключение от сервера."""
         if self.client_thread:
+            if self.logger:
+                self.logger.info("Отключение от сервера", source="client_qt")
             self.client_thread.stop()
             self.client_thread = None
 
@@ -928,7 +907,11 @@ class MainWindow(QMainWindow):
             self._record_path = path
             self._record_pending = True
             self.status_label.setText("REC: ожидание первого кадра...")
+            if self.logger:
+                self.logger.info(f"Начало записи: {path}", source="client_qt")
         else:
+            if self.logger and self._record_path:
+                self.logger.info(f"Остановка записи: {self._record_path}", source="client_qt")
             self._stop_recording()
             # статус не трогаем если подключены — оставим текущий
             if not (self.client_thread and self.client_thread.isRunning()):
@@ -936,6 +919,8 @@ class MainWindow(QMainWindow):
 
     def on_error(self, message: str):
         """Обработка ошибки."""
+        if self.logger:
+            self.logger.error(f"Ошибка GUI: {message}", source="client_qt")
         QMessageBox.critical(self, "Ошибка", message)
         self.disconnect()
 
@@ -960,7 +945,12 @@ def main():
     parser.add_argument("--signal-port", type=int, default=None, help="Порт HTTP signaling")
     parser.add_argument("--auto", action="store_true", default=False, help="Автообнаружение сервера")
     parser.add_argument("--stun", action="store_true", default=False, help="Использовать публичный STUN")
+    parser.add_argument("--log-level", type=str, default="info", choices=["spam", "debug", "verbose", "info", "warning", "error", "critical"], help="Уровень логирования")
+    parser.add_argument("--log-path", type=str, default="logs", help="Путь к папке с логами")
     args = parser.parse_args()
+
+    log_level = loggingLevels.get(args.log_level, INFO)
+    logger = Logger("client_qt", args.log_path, log_level)
 
     app = QApplication(sys.argv)
     # HiDPI: более четкие pixmap'ы (если поддерживается)
@@ -973,8 +963,10 @@ def main():
         pass
     apply_dark_theme(app)
     
-    window = MainWindow()
+    window = MainWindow(logger=logger)
     window.show()
+    
+    logger.info("Запуск GUI клиента", source="client_qt")
 
     # Если указаны параметры командной строки, подключаемся автоматически
     if args.host or args.auto:

@@ -3,3 +3,5 @@ aiortc>=1.8.0
 opencv-python>=4.10.0
 numpy>=1.21.0
 PyQt5>=5.15.0
+verboselogs>=1.7
+coloredlogs>=15.0

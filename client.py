@@ -13,12 +13,15 @@ import asyncio
 import json
 import socket
 import time
+from logging import INFO
+
+from Logger import Logger, loggingLevels
 
 
 DISCOVERY_PORT = 5003
 
 
-def discover_server(timeout: int = 5):
+def discover_server(timeout: int = 5, logger: Logger = None):
     """Автоматически находит WebRTC сервер через UDP broadcast."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -26,7 +29,8 @@ def discover_server(timeout: int = 5):
         sock.settimeout(1)
         sock.bind(("", DISCOVERY_PORT))
 
-        print(f"Поиск сервера в локальной сети (таймаут: {timeout} сек)...")
+        if logger:
+            logger.info(f"Поиск сервера в локальной сети (таймаут: {timeout} сек)...", source="client")
         start = time.time()
         while time.time() - start < timeout:
             try:
@@ -39,7 +43,8 @@ def discover_server(timeout: int = 5):
                 sender_ip = _addr[0]
                 server_info["host"] = sender_ip
                 sock.close()
-                print(f"✓ Сервер найден (WebRTC): {server_info.get('host')}:{server_info.get('signal_port')}")
+                if logger:
+                    logger.info(f"✓ Сервер найден (WebRTC): {server_info.get('host')}:{server_info.get('signal_port')}", source="client")
                 return server_info
             except socket.timeout:
                 continue
@@ -116,7 +121,7 @@ async def _wait_ice_complete(pc):
         pass
 
 
-async def run_client(host: str, signal_port: int, stun: bool):
+async def run_client(host: str, signal_port: int, stun: bool, logger: Logger):
     aiohttp, cv2, RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender = _lazy_imports()
 
     cfg = RTCConfiguration(
@@ -174,7 +179,7 @@ async def run_client(host: str, signal_port: int, stun: bool):
 
     await pc.setRemoteDescription(RTCSessionDescription(sdp=data["sdp"], type=data["type"]))
 
-    print("WebRTC соединение установлено. Нажмите Q/ESC в окне для выхода.")
+    logger.info("WebRTC соединение установлено. Нажмите Q/ESC в окне для выхода.", source="client")
     await stop_event.wait()
 
     await pc.close()
@@ -191,20 +196,32 @@ def main():
     parser.add_argument("--signal-port", type=int, default=8080, help="Порт HTTP signaling (по умолчанию 8080)")
     parser.add_argument("--auto", action="store_true", default=False, help="Автообнаружение сервера в LAN")
     parser.add_argument("--stun", action="store_true", default=False, help="Использовать публичный STUN (для LAN не нужно)")
+    parser.add_argument("--log-level", type=str, default="info", choices=["spam", "debug", "verbose", "info", "warning", "error", "critical"], help="Уровень логирования")
+    parser.add_argument("--log-path", type=str, default="logs", help="Путь к папке с логами")
     args = parser.parse_args()
+
+    log_level = loggingLevels.get(args.log_level, INFO)
+    logger = Logger("client", args.log_path, log_level)
 
     auto = args.auto or (str(args.host).lower() == "auto")
     host = args.host
     signal_port = int(args.signal_port)
 
     if auto:
-        info = discover_server(timeout=5)
+        info = discover_server(timeout=5, logger=logger)
         if not info:
+            logger.error("Сервер не найден в локальной сети.", source="client")
             raise SystemExit("Сервер не найден в локальной сети.")
         host = info.get("host", host)
         signal_port = int(info.get("signal_port") or signal_port)
 
-    asyncio.run(run_client(host, signal_port, args.stun))
+    try:
+        asyncio.run(run_client(host, signal_port, args.stun, logger))
+    except KeyboardInterrupt:
+        logger.info("Остановка клиента по запросу пользователя", source="client")
+    except Exception as e:
+        logger.error(f"Ошибка клиента: {e}", source="client")
+        raise
 
 
 if __name__ == "__main__":

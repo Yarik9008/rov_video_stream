@@ -20,6 +20,9 @@ import socket
 import threading
 import time
 from pathlib import Path
+from logging import INFO
+
+from Logger import Logger, loggingLevels
 
 
 def get_local_ip() -> str:
@@ -108,14 +111,6 @@ def _lazy_imports():
             f"Детали: {e}"
         )
     return cv2, web, RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender, VideoStreamTrack, VideoFrame
-
-
-def _ts() -> str:
-    """Короткий timestamp для логов."""
-    try:
-        return time.strftime("%H:%M:%S")
-    except Exception:
-        return "??:??:??"
 
 
 def _safe_client_ip(request) -> str:
@@ -423,7 +418,7 @@ class DiscoveryBroadcaster:
             pass
 
 
-async def run_server(args):
+async def run_server(args, logger: Logger):
     cv2, web, RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender, VideoStreamTrack, VideoFrame = _lazy_imports()
 
     # host/local_ip
@@ -468,7 +463,7 @@ async def run_server(args):
             "last_ice_state": None,
         }
 
-        print(f"[{_ts()}] client#{pc_id} CONNECT offer from {client_ip}" + (f" | UA: {user_agent}" if user_agent else ""))
+        logger.info(f"client#{pc_id} CONNECT offer from {client_ip}" + (f" | UA: {user_agent}" if user_agent else ""), source="server")
 
         @pc.on("connectionstatechange")
         async def on_state_change():
@@ -479,12 +474,12 @@ async def run_server(args):
                 prev = meta.get("last_conn_state")
                 if state != prev:
                     meta["last_conn_state"] = state
-                    print(f"[{_ts()}] client#{_id} PC state: {state}")
+                    logger.info(f"client#{_id} PC state: {state}", source="server")
 
                 if pc.connectionState in ("failed", "disconnected", "closed"):
                     pcs.discard(pc)
                     ip = meta.get("ip", "unknown")
-                    print(f"[{_ts()}] client#{_id} DISCONNECT ({pc.connectionState}) from {ip}")
+                    logger.info(f"client#{_id} DISCONNECT ({pc.connectionState}) from {ip}", source="server")
                     try:
                         await pc.close()
                     except Exception:
@@ -502,7 +497,7 @@ async def run_server(args):
                 prev = meta.get("last_ice_state")
                 if state != prev:
                     meta["last_ice_state"] = state
-                    print(f"[{_ts()}] client#{_id} ICE state: {state}")
+                    logger.debug(f"client#{_id} ICE state: {state}", source="server")
             except Exception:
                 pass
 
@@ -521,7 +516,7 @@ async def run_server(args):
             await pc.setLocalDescription(answer)
             await _wait_ice_complete(pc)
 
-            print(f"[{_ts()}] client#{pc_id} ANSWER ready (pc={pc.connectionState}, ice={pc.iceConnectionState})")
+            logger.info(f"client#{pc_id} ANSWER ready (pc={pc.connectionState}, ice={pc.iceConnectionState})", source="server")
             return web.json_response({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
         except Exception as e:
             pcs.discard(pc)
@@ -532,7 +527,7 @@ async def run_server(args):
                 await pc.close()
             except Exception:
                 pass
-            print(f"[{_ts()}] client#{_id} ERROR during setup from {ip}: {e}")
+            logger.error(f"client#{_id} ERROR during setup from {ip}: {e}", source="server")
             raise web.HTTPInternalServerError(text=f"Ошибка установки соединения: {e}")
 
     async def index(_request):
@@ -560,19 +555,19 @@ async def run_server(args):
     broadcaster.start()
     atexit.register(broadcaster.stop)
 
-    print("Запуск WebRTC сервера...")
-    print(f"Платформа: {platform.system()}")
-    print(f"Источник: {args.source}")
+    logger.info("Запуск WebRTC сервера...", source="server")
+    logger.info(f"Платформа: {platform.system()}", source="server")
+    logger.info(f"Источник: {args.source}", source="server")
     if args.source == "webcam":
-        print(f"Камера: индекс {args.device}")
+        logger.info(f"Камера: индекс {args.device}", source="server")
     else:
-        print(f"Файл: {args.file}")
-    print(f"Локальный IP: {local_ip}")
-    print(f"Signaling: http://{local_ip}:{int(args.signal_port)}")
+        logger.info(f"Файл: {args.file}", source="server")
+    logger.info(f"Локальный IP: {local_ip}", source="server")
+    logger.info(f"Signaling: http://{local_ip}:{int(args.signal_port)}", source="server")
     if host != "127.0.0.1":
-        print(f"Автообнаружение: включено (UDP broadcast порт {DiscoveryBroadcaster.DISCOVERY_PORT})")
-        print("Клиент:  python3 client.py --auto")
-    print("\nНажмите Ctrl+C для остановки.\n")
+        logger.info(f"Автообнаружение: включено (UDP broadcast порт {DiscoveryBroadcaster.DISCOVERY_PORT})", source="server")
+        logger.info("Клиент:  python3 client.py --auto", source="server")
+    logger.info("Нажмите Ctrl+C для остановки.", source="server")
 
     stop_event = asyncio.Event()
 
@@ -603,7 +598,7 @@ async def run_server(args):
         try:
             alive = len(pcs)
             if alive:
-                print(f"[{_ts()}] shutdown: closing {alive} active client(s)")
+                logger.info(f"shutdown: closing {alive} active client(s)", source="server")
         except Exception:
             pass
         coros = [pc.close() for pc in pcs]
@@ -624,9 +619,20 @@ def main():
     parser.add_argument("--bitrate", type=int, default=6000, help="Целевой битрейт видео (kbps), по умолчанию 6000")
     parser.add_argument("--device", type=int, default=0, help="Индекс камеры (для webcam)")
     parser.add_argument("--stun", action="store_true", default=False, help="Использовать публичный STUN (для LAN не нужно)")
+    parser.add_argument("--log-level", type=str, default="info", choices=["spam", "debug", "verbose", "info", "warning", "error", "critical"], help="Уровень логирования")
+    parser.add_argument("--log-path", type=str, default="logs", help="Путь к папке с логами")
 
     args = parser.parse_args()
-    asyncio.run(run_server(args))
+    
+    log_level = loggingLevels.get(args.log_level, INFO)
+    logger = Logger("server", args.log_path, log_level)
+    
+    try:
+        asyncio.run(run_server(args, logger))
+    except KeyboardInterrupt:
+        logger.info("Остановка сервера по запросу пользователя", source="server")
+    except Exception as e:
+        logger.critical(f"Критическая ошибка сервера: {e}", source="server")
 
 
 if __name__ == "__main__":
