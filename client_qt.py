@@ -299,9 +299,7 @@ class WebRTCClientThread(QThread):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._pc = None
         self._stop_event: Optional[asyncio.Event] = None
-        # Throttling для обновления UI - ограничиваем частоту до 30 FPS
-        self._last_frame_time = 0.0
-        self._min_frame_interval = 1.0 / 30.0  # 30 FPS максимум для UI
+        # Убрано throttling для максимального качества - получаем все кадры от сервера
 
     def run(self):
         """Запускает asyncio event loop в отдельном потоке."""
@@ -377,16 +375,12 @@ class WebRTCClientThread(QThread):
                 if self.logger:
                     self.logger.info("Video track получен", source="client_qt")
                 try:
-                    import time
                     while not self._stop_event.is_set():
                         try:
                             frame = await track.recv()
                             
-                            # Throttling: ограничиваем частоту обновления UI до 30 FPS
-                            current_time = time.time()
-                            if current_time - self._last_frame_time < self._min_frame_interval:
-                                continue  # Пропускаем кадр, если прошло мало времени
-                            self._last_frame_time = current_time
+                            # Убрано throttling - получаем все кадры для максимального качества
+                            # Ограничение FPS должно происходить только на сервере
                             
                             img = frame.to_ndarray(format="bgr24")
                             # Конвертируем BGR (OpenCV) в RGB для Qt
@@ -535,12 +529,13 @@ class VideoWidget(QLabel):
             pixmap = QPixmap.fromImage(q_image)
             
             # Масштабируем на размер виджета без сохранения пропорций
+            # Используем SmoothTransformation для лучшего качества вместо FastTransformation
             widget_size = self.size()
             if widget_size.width() > 0 and widget_size.height() > 0:
                 if PYQT6:
-                    scaled_pixmap = pixmap.scaled(widget_size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
+                    scaled_pixmap = pixmap.scaled(widget_size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 else:
-                    scaled_pixmap = pixmap.scaled(widget_size, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+                    scaled_pixmap = pixmap.scaled(widget_size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
                 self.setPixmap(scaled_pixmap)
             else:
                 self.setPixmap(pixmap)

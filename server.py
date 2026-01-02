@@ -91,6 +91,35 @@ def get_broadcast_address(ip: str) -> str:
     return "255.255.255.255"
 
 
+def calculate_optimal_bitrate(width: int, height: int, fps: int) -> int:
+    """
+    Рассчитывает оптимальный битрейт для максимального качества на основе разрешения и FPS.
+    
+    Формула: битрейт = (ширина * высота * FPS * бит_на_пиксель) / 1000
+    Для максимального качества используем повышенное значение bits_per_pixel,
+    чтобы получить минимальное сжатие (ближе к visually-lossless).
+    
+    Returns: битрейт в kbps
+    """
+    if width <= 0 or height <= 0 or fps <= 0:
+        return 200000  # Fallback: 200 Mbps
+    
+    pixels = width * height
+    # Примерные ориентиры:
+    # - 1080p@30 при 0.5 bpp ≈ 31 Mbps
+    # - 4K@60   при 0.5 bpp ≈ 249 Mbps
+    bits_per_pixel = 0.5  # Для максимального качества
+    bitrate_bps = pixels * fps * bits_per_pixel
+    bitrate_kbps = int(bitrate_bps / 1000)
+    
+    # Ограничения:
+    # - Минимум: 20000 kbps (20 Mbps), чтобы не деградировать качество на 1080p+
+    # - Максимум: 500000 kbps (500 Mbps) для очень высоких разрешений
+    bitrate_kbps = max(20000, min(500000, bitrate_kbps))
+    
+    return bitrate_kbps
+
+
 def _lazy_imports():
     try:
         import cv2  # type: ignore
@@ -269,13 +298,30 @@ class _SharedFrameSource:
                     continue
 
             # Ресайз применяем, если задан target size (и для файла, и для камеры)
+            # Выбираем алгоритм интерполяции в зависимости от операции:
+            # - INTER_AREA для уменьшения (лучшее качество при downscale)
+            # - INTER_LANCZOS4 для увеличения (лучшее качество при upscale)
             if self._target_width and self._target_height:
                 try:
-                    if frame.shape[1] != self._target_width or frame.shape[0] != self._target_height:
+                    current_h, current_w = frame.shape[:2]
+                    if current_w != self._target_width or current_h != self._target_height:
+                        # Определяем, увеличиваем или уменьшаем
+                        scale_w = self._target_width / current_w
+                        scale_h = self._target_height / current_h
+                        is_upscaling = scale_w > 1.0 or scale_h > 1.0
+                        
+                        # Выбираем оптимальный алгоритм интерполяции
+                        if is_upscaling:
+                            # Для увеличения используем LANCZOS4 - лучшее качество
+                            interpolation = cv2.INTER_LANCZOS4
+                        else:
+                            # Для уменьшения используем AREA - лучшее качество
+                            interpolation = cv2.INTER_AREA
+                        
                         frame = cv2.resize(
                             frame,
                             (self._target_width, self._target_height),
-                            interpolation=cv2.INTER_AREA,
+                            interpolation=interpolation,
                         )
                 except Exception:
                     pass
@@ -358,8 +404,9 @@ async def _wait_ice_complete(pc):
 async def _apply_sender_quality(sender, target_bitrate_kbps: int, target_fps: int):
     """
     Пытаемся поднять качество через RTCRtpSender.setParameters():
-    - maxBitrate (бит/с)
+    - maxBitrate (бит/с) - максимальный битрейт для максимального качества
     - maxFramerate (кадры/с)
+    - scaleResolutionDownBy - не используем (сохраняем исходное разрешение)
 
     В зависимости от версии aiortc setParameters может быть корутиной.
     """
@@ -372,9 +419,17 @@ async def _apply_sender_quality(sender, target_bitrate_kbps: int, target_fps: in
 
         enc = params.encodings[0]
         if target_bitrate_kbps and target_bitrate_kbps > 0:
+            # Устанавливаем максимальный битрейт для максимального качества
             enc.maxBitrate = int(target_bitrate_kbps) * 1000
+            # Также устанавливаем minBitrate для стабильности (50% от max)
+            if hasattr(enc, 'minBitrate'):
+                enc.minBitrate = int(target_bitrate_kbps * 0.5) * 1000
         if target_fps and target_fps > 0:
             enc.maxFramerate = int(target_fps)
+        
+        # Отключаем масштабирование разрешения для максимального качества
+        if hasattr(enc, 'scaleResolutionDownBy'):
+            enc.scaleResolutionDownBy = 1.0
 
         res = sender.setParameters(params)
         if asyncio.iscoroutine(res):
@@ -529,8 +584,17 @@ async def run_server(args, logger: Logger):
             sender = pc.addTrack(track)
             _prefer_h264(pc)
 
+            # Определяем битрейт: автоматический расчет в режиме максимального качества
+            target_bitrate = int(args.bitrate)
+            if args.max_quality:
+                video_size = shared.get_video_size()
+                if video_size:
+                    width, height = video_size
+                    target_bitrate = calculate_optimal_bitrate(width, height, args.fps)
+                    logger.info(f"client#{pc_id} Автоматический битрейт для {width}x{height}@{args.fps}fps: {target_bitrate} kbps", source="server")
+
             # Качество: попросим encoder о более высоком битрейте/фпс
-            await _apply_sender_quality(sender, int(args.bitrate), int(args.fps))
+            await _apply_sender_quality(sender, target_bitrate, int(args.fps))
 
             await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type=offer_type))
             answer = await pc.createAnswer()
@@ -598,6 +662,25 @@ async def run_server(args, logger: Logger):
         logger.info(f"Камера: индекс {args.device}", source="server")
     else:
         logger.info(f"Файл: {args.file}", source="server")
+    
+    # Информация о качестве
+    video_size = shared.get_video_size()
+    if video_size:
+        width, height = video_size
+        logger.info(f"Разрешение видео: {width}x{height}", source="server")
+        if args.max_quality:
+            auto_bitrate = calculate_optimal_bitrate(width, height, args.fps)
+            logger.info(f"Режим максимального качества: ВКЛ (автобитрейт: {auto_bitrate} kbps)", source="server")
+        else:
+            logger.info(f"Битрейт: {args.bitrate} kbps ({args.bitrate/1000:.1f} Mbps)", source="server")
+    else:
+        logger.info(f"Битрейт: {args.bitrate} kbps ({args.bitrate/1000:.1f} Mbps)", source="server")
+    logger.info(f"FPS: {args.fps}", source="server")
+    if args.width > 0 and args.height > 0:
+        logger.info(f"Ресайз: {args.width}x{args.height}", source="server")
+    else:
+        logger.info("Ресайз: отключен (исходное разрешение)", source="server")
+    
     logger.info(f"Локальный IP: {local_ip}", source="server")
     logger.info(f"Signaling: http://{local_ip}:{int(args.signal_port)}", source="server")
     if host != "127.0.0.1":
@@ -650,10 +733,19 @@ def main():
     parser.add_argument("-t", "--test", action="store_true", default=False, help="Транслировать тестовое видео test.mp4 в исходном разрешении")
     parser.add_argument("--host", type=str, default=None, help="Хост для режима LAN (обычно 0.0.0.0)")
     parser.add_argument("--signal-port", type=int, default=8080, help="Порт HTTP signaling (по умолчанию 8080)")
-    parser.add_argument("--width", type=int, default=1280, help="Ширина (по умолчанию 1280, 0 для исходного разрешения)")
-    parser.add_argument("--height", type=int, default=720, help="Высота (по умолчанию 720, 0 для исходного разрешения)")
-    parser.add_argument("--fps", type=int, default=30, help="FPS")
-    parser.add_argument("--bitrate", type=int, default=6000, help="Целевой битрейт видео (kbps), по умолчанию 6000")
+    parser.add_argument("--width", type=int, default=0, help="Ширина (0 для исходного разрешения, по умолчанию 0 - максимальное качество)")
+    parser.add_argument("--height", type=int, default=0, help="Высота (0 для исходного разрешения, по умолчанию 0 - максимальное качество)")
+    parser.add_argument("--fps", type=int, default=30, help="FPS (рекомендуется 30-60 для максимального качества)")
+    # Максимальное качество включено по умолчанию.
+    # argparse.BooleanOptionalAction создаёт флаги:
+    #   --max-quality / --no-max-quality
+    parser.add_argument(
+        "--max-quality",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Режим максимального качества (по умолчанию ВКЛ): автоматический битрейт на основе разрешения, без ресайза",
+    )
+    parser.add_argument("--bitrate", type=int, default=200000, help="Целевой битрейт видео (kbps), по умолчанию 200000 (200 Mbps для максимального качества)")
     parser.add_argument("--device", type=int, default=0, help="Индекс камеры (для webcam)")
     parser.add_argument("--stun", action="store_true", default=False, help="Использовать публичный STUN (для LAN не нужно)")
     parser.add_argument("--log-level", type=str, default="info", choices=["spam", "debug", "verbose", "info", "warning", "error", "critical"], help="Уровень логирования")
@@ -668,6 +760,22 @@ def main():
         args.file = test_video_path
         args.width = 0  # 0 означает использовать исходное разрешение
         args.height = 0  # 0 означает использовать исходное разрешение
+        # Увеличиваем битрейт для тестового видео, чтобы уменьшить сжатие
+        # Устанавливаем очень высокий битрейт для минимального сжатия (200 Mbps)
+        args.bitrate = 200000
+    
+    # Обработка режима максимального качества
+    if args.max_quality:
+        # В режиме максимального качества:
+        # 1. Используем исходное разрешение (если не указано явно)
+        if args.width == 0 and args.height == 0:
+            # Разрешение будет определено автоматически из источника
+            pass
+        # 2. Автоматически рассчитываем битрейт на основе разрешения
+        # (будет пересчитан после получения реального разрешения)
+        # 3. Увеличиваем FPS если возможно
+        if args.fps < 30:
+            args.fps = 30
     
     log_level = loggingLevels.get(args.log_level, INFO)
     logger = Logger("server", args.log_path, log_level)
