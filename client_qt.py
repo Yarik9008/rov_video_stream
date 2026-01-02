@@ -489,7 +489,8 @@ class VideoWidget(QLabel):
         else:
             self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet("background-color: black; color: white; font-size: 16px;")
-        self.setMinimumSize(640, 480)
+        # Минимальный размер видео-виджета (16:9 пропорция, разумный минимум)
+        self.setMinimumSize(320, 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding if PYQT6 else QSizePolicy.Expanding,
                            QSizePolicy.Policy.Expanding if PYQT6 else QSizePolicy.Expanding)
 
@@ -565,8 +566,6 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """Инициализация UI."""
         self.setWindowTitle("WebRTC Video Stream Client")
-        # Окно должно быть растягиваемым; минимальный размер делаем умеренным
-        self.setMinimumSize(520, 420)
 
         # Центральный виджет
         central_widget = QWidget()
@@ -616,19 +615,34 @@ class MainWindow(QMainWindow):
         
         main_layout.addLayout(control_layout)
 
-        # Видео
+        # Видео (занимает все доступное пространство со stretch=1)
         main_layout.addWidget(self.video_widget, stretch=1)
 
-        # Статус
+        # Статус - жестко привязан к нижней границе окна
         self.status_label = QLabel("Готов к подключению")
         self.status_label.setStyleSheet("padding: 6px; background-color: #1e1e1e; color: #dcdcdc;")
-        # Устанавливаем политику размера, чтобы статус всегда оставался внизу и не сжимался
+        # Устанавливаем политику размера: Fixed по вертикали, чтобы статус имел фиксированную высоту
         if PYQT6:
             self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         else:
             self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.status_label.setMinimumHeight(30)  # Минимальная высота для статус-бара
+        # Фиксированная высота статус-бара (минимальная = максимальная)
+        self.status_label.setMinimumHeight(30)
+        self.status_label.setMaximumHeight(30)
+        # Добавляем статус в layout со stretch=0, чтобы он оставался внизу
         main_layout.addWidget(self.status_label, stretch=0)
+        
+        # Вычисляем минимальный размер окна на основе минимальных размеров всех виджетов
+        # Это делается после установки layout, чтобы Qt мог вычислить минимальный размер
+        central_widget.updateGeometry()  # Обновляем геометрию для правильного расчета
+        min_size = central_widget.minimumSizeHint()
+        if min_size.isValid() and min_size.width() > 0 and min_size.height() > 0:
+            # Устанавливаем минимальный размер окна на основе минимального размера центрального виджета
+            # Добавляем небольшой запас для отступов окна (title bar, borders)
+            self.setMinimumSize(min_size.width() + 20, min_size.height() + 40)
+        else:
+            # Fallback: устанавливаем минимальный размер, если вычисление не удалось
+            self.setMinimumSize(520, 420)
         
         # Устанавливаем начальный размер окна пропорционально предполагаемому разрешению видео
         self._fit_window_to_video(DEFAULT_VIDEO_WIDTH, DEFAULT_VIDEO_HEIGHT)
