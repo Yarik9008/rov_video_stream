@@ -139,22 +139,41 @@ async def run_client(host: str, signal_port: int, stun: bool):
                 jb_ms = None
 
                 # Candidate-pair RTT (network)
-                for report in stats.values():
-                    if getattr(report, "type", None) == "candidate-pair":
-                        if getattr(report, "state", None) == "succeeded" and getattr(report, "nominated", False):
-                            crt = getattr(report, "currentRoundTripTime", None)
-                            if isinstance(crt, (int, float)) and crt >= 0:
-                                rtt_ms = int(crt * 1000)
-                                break
+                for stat_id, stat in stats.items():
+                    try:
+                        if hasattr(stat, "type") and stat.type == "candidate-pair":
+                            state = getattr(stat, "state", None)
+                            nominated = getattr(stat, "nominated", False)
+                            if state == "succeeded" and nominated:
+                                crt = getattr(stat, "currentRoundTripTime", None)
+                                if crt is not None and isinstance(crt, (int, float)) and crt > 0:
+                                    rtt_ms = int(crt * 1000)
+                    except (AttributeError, TypeError):
+                        continue
 
                 # Inbound RTP jitter buffer delay (playout)
-                for report in stats.values():
-                    if getattr(report, "type", None) == "inbound-rtp" and getattr(report, "kind", None) == "video":
-                        emitted = getattr(report, "jitterBufferEmittedCount", 0) or 0
-                        delay = getattr(report, "jitterBufferDelay", None)
-                        if emitted and isinstance(delay, (int, float)) and delay >= 0:
-                            jb_ms = int((delay / emitted) * 1000)
-                            break
+                for stat_id, stat in stats.items():
+                    try:
+                        if hasattr(stat, "type") and stat.type == "inbound-rtp":
+                            kind = getattr(stat, "kind", None)
+                            if kind == "video":
+                                # jitterBufferDelay уже в секундах (накопленное время)
+                                jbd = getattr(stat, "jitterBufferDelay", None)
+                                if jbd is not None and isinstance(jbd, (int, float)) and jbd >= 0:
+                                    # Также можно попробовать jitterBufferTargetDelay
+                                    jb_target = getattr(stat, "jitterBufferTargetDelay", None)
+                                    if jb_target is not None and isinstance(jb_target, (int, float)) and jb_target > 0:
+                                        jb_ms = int(jb_target * 1000)
+                                    else:
+                                        # Используем накопленную задержку, но делим на количество для среднего
+                                        emitted = getattr(stat, "jitterBufferEmittedCount", None)
+                                        if emitted and emitted > 0:
+                                            jb_ms = int((jbd / emitted) * 1000)
+                                        else:
+                                            jb_ms = int(jbd * 1000)
+                                    break
+                    except (AttributeError, TypeError):
+                        continue
 
                 # Оценка задержки (ms): playout (JB) + половина RTT (в одну сторону)
                 delay_est_ms = None
