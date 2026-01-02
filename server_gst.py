@@ -112,6 +112,9 @@ def _require_gstwebrtc():
 
 def get_local_ip() -> str:
     """Best-effort локальный IPv4 (LAN)."""
+    ips = get_local_ips()
+    if ips:
+        return ips[0]
     candidates: list[str] = []
     try:
         _name, _aliases, addrs = socket.gethostbyname_ex(socket.gethostname())
@@ -133,6 +136,49 @@ def get_local_ip() -> str:
         if ip and not ip.startswith(("127.", "169.254.")):
             return ip
     return "127.0.0.1"
+
+
+def _is_usable_ipv4(ip: str) -> bool:
+    try:
+        socket.inet_aton(ip)
+    except OSError:
+        return False
+    if ip.startswith("127.") or ip.startswith("169.254."):
+        return False
+    return True
+
+
+def get_local_ips() -> list[str]:
+    """
+    Возвращает список пригодных локальных IPv4 адресов (LAN).
+    На Windows часто есть VPN/виртуальные интерфейсы — поэтому отдаём список,
+    чтобы broadcaster мог слать на все broadcast подсетей.
+    """
+    candidates: list[str] = []
+
+    try:
+        _name, _aliases, addrs = socket.gethostbyname_ex(socket.gethostname())
+        for ip in addrs:
+            if _is_usable_ipv4(ip) and ip not in candidates:
+                candidates.append(ip)
+    except Exception:
+        pass
+
+    for target in (("1.1.1.1", 80), ("8.8.8.8", 80), ("10.255.255.255", 1)):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0)
+            try:
+                s.connect(target)
+                ip = s.getsockname()[0]
+                if _is_usable_ipv4(ip) and ip not in candidates:
+                    candidates.append(ip)
+            finally:
+                s.close()
+        except Exception:
+            continue
+
+    return candidates
 
 
 def get_broadcast_address(ip: str) -> str:
@@ -184,7 +230,11 @@ class DiscoveryBroadcaster:
                 try:
                     payload = self._payload_factory()
                     message = json.dumps(payload).encode("utf-8")
-                    targets = {get_broadcast_address(get_local_ip()), "255.255.255.255"}
+                    # Шлём и на универсальный, и на broadcast всех локальных интерфейсов.
+                    # Это важно на Windows, где 255.255.255.255 часто блокируется firewall'ом.
+                    targets = {"255.255.255.255"}
+                    for ip in get_local_ips():
+                        targets.add(get_broadcast_address(ip))
                     for bcast in targets:
                         try:
                             sock.sendto(message, (bcast, self.DISCOVERY_PORT))
@@ -584,6 +634,7 @@ def main():
         return
 
     local_ip = get_local_ip()
+    local_ips = get_local_ips()
     payload = {
         "backend": "gst-webrtc",
         "host": local_ip,
@@ -605,6 +656,7 @@ def main():
 
     logger.info("Запуск GStreamer WebRTC сервера (NVENC)...", source="server_gst")
     logger.info(f"GStreamer: {Gst.version_string()}", source="server_gst")
+    logger.info(f"Local IPs: {', '.join(local_ips) if local_ips else local_ip}", source="server_gst")
     logger.info(f"Signaling: http://{local_ip}:{int(args.signal_port)}", source="server_gst")
     logger.info(f"Discovery UDP: {DiscoveryBroadcaster.DISCOVERY_PORT}", source="server_gst")
     logger.info(f"webrtcbin: {'OK' if _element_exists('webrtcbin') else 'MISSING'}", source="server_gst")
