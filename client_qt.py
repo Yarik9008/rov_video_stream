@@ -544,6 +544,9 @@ class MainWindow(QMainWindow):
         self._record_pending: bool = False
         self._record_path: Optional[str] = None
         self._record_fps: float = 30.0
+        # Aspect ratio видео для пропорционального изменения размера окна
+        self._video_aspect_ratio: float = DEFAULT_VIDEO_WIDTH / DEFAULT_VIDEO_HEIGHT
+        self._resizing: bool = False  # Флаг для предотвращения рекурсии при изменении размера
         self.init_ui()
 
     def init_ui(self):
@@ -630,6 +633,9 @@ class MainWindow(QMainWindow):
             if video_w <= 0 or video_h <= 0:
                 return
 
+            # Обновляем aspect ratio видео
+            self._video_aspect_ratio = video_w / video_h
+
             screen = QApplication.primaryScreen()
             if screen is None:
                 return
@@ -645,7 +651,9 @@ class MainWindow(QMainWindow):
             target_w = int(video_w * scale + chrome_w)
             target_h = int(video_h * scale + chrome_h)
 
+            self._resizing = True
             self.resize(max(self.minimumWidth(), target_w), max(self.minimumHeight(), target_h))
+            self._resizing = False
         except Exception:
             pass
 
@@ -689,6 +697,69 @@ class MainWindow(QMainWindow):
         self.video_widget.update_frame(frame_data)
 
     def resizeEvent(self, event):
+        # Если мы сами изменяем размер, не корректируем его
+        if self._resizing:
+            super().resizeEvent(event)
+            try:
+                self.video_widget.redraw_last()
+            except Exception:
+                pass
+            return
+        
+        # Корректируем размер окна для сохранения пропорций видео
+        try:
+            new_size = event.size()
+            old_size = event.oldSize()
+            
+            # Размеры элементов управления (chrome)
+            chrome_h = 140
+            chrome_w = 60
+            
+            # Вычисляем размер области видео
+            video_area_w = new_size.width() - chrome_w
+            video_area_h = new_size.height() - chrome_h
+            
+            # Вычисляем текущий aspect ratio области видео
+            if video_area_h > 0:
+                current_aspect = video_area_w / video_area_h
+            else:
+                current_aspect = self._video_aspect_ratio
+            
+            # Если пропорции не совпадают, корректируем размер
+            if abs(current_aspect - self._video_aspect_ratio) > 0.01 and video_area_w > 0 and video_area_h > 0:
+                # Определяем, какое измерение было изменено пользователем
+                if old_size.isValid():
+                    width_changed = abs(new_size.width() - old_size.width()) > abs(new_size.height() - old_size.height())
+                else:
+                    width_changed = True
+                
+                if width_changed:
+                    # Пользователь изменил ширину - корректируем высоту
+                    target_video_w = video_area_w
+                    target_video_h = int(target_video_w / self._video_aspect_ratio)
+                    target_h = target_video_h + chrome_h
+                    target_w = new_size.width()
+                else:
+                    # Пользователь изменил высоту - корректируем ширину
+                    target_video_h = video_area_h
+                    target_video_w = int(target_video_h * self._video_aspect_ratio)
+                    target_w = target_video_w + chrome_w
+                    target_h = new_size.height()
+                
+                # Проверяем минимальные размеры
+                min_w = self.minimumWidth()
+                min_h = self.minimumHeight()
+                target_w = max(min_w, target_w)
+                target_h = max(min_h, target_h)
+                
+                # Устанавливаем корректный размер
+                self._resizing = True
+                self.resize(target_w, target_h)
+                self._resizing = False
+                return
+        except Exception:
+            pass
+        
         super().resizeEvent(event)
         # Перерисовать последний кадр под новый размер окна
         try:
