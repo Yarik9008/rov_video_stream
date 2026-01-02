@@ -11,19 +11,22 @@ WebRTC Video Streaming Client (PyQt GUI)
 import argparse
 import asyncio
 import json
+import queue
 import socket
 import sys
 import threading
 import time
+from datetime import datetime
 from typing import Optional
 
 PYQT6 = False
 try:
     from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
-    from PyQt6.QtGui import QImage, QPixmap
+    from PyQt6.QtGui import QImage, QPixmap, QColor, QPalette
     from PyQt6.QtWidgets import (
         QApplication,
         QCheckBox,
+        QFileDialog,
         QLabel,
         QMainWindow,
         QPushButton,
@@ -39,10 +42,11 @@ try:
 except ImportError:
     try:
         from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
-        from PyQt5.QtGui import QImage, QPixmap
+        from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette
         from PyQt5.QtWidgets import (
             QApplication,
             QCheckBox,
+            QFileDialog,
             QLabel,
             QMainWindow,
             QPushButton,
@@ -64,6 +68,117 @@ except ImportError:
 
 
 DISCOVERY_PORT = 5003
+
+
+def apply_dark_theme(app: QApplication):
+    """Жёстко задаём тёмную тему (Fusion + QPalette)."""
+    try:
+        app.setStyle("Fusion")
+    except Exception:
+        pass
+
+    palette = QPalette()
+    # Base colors
+    palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(220, 220, 220))
+    palette.setColor(QPalette.ColorRole.Base, QColor(20, 20, 20))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(30, 30, 30))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(45, 45, 45))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(220, 220, 220))
+    palette.setColor(QPalette.ColorRole.Text, QColor(220, 220, 220))
+    palette.setColor(QPalette.ColorRole.Button, QColor(45, 45, 45))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(220, 220, 220))
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(45, 140, 255))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(10, 10, 10))
+
+    # Disabled
+    try:
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(130, 130, 130))
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(130, 130, 130))
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(130, 130, 130))
+    except Exception:
+        pass
+
+    app.setPalette(palette)
+
+    # Tooltips
+    app.setStyleSheet(
+        "QToolTip { color: #dcdcdc; background-color: #2d2d2d; border: 1px solid #4a4a4a; }"
+    )
+
+
+class Mp4Recorder:
+    """Запись входящего видео в MP4 (в фоне), чтобы не тормозить UI."""
+
+    def __init__(self, path: str, fps: float, width: int, height: int):
+        self.path = str(path)
+        self.fps = float(fps)
+        self.width = int(width)
+        self.height = int(height)
+
+        self._q: "queue.Queue" = queue.Queue(maxsize=300)
+        self._stop = threading.Event()
+        self._thread = None
+        self._dropped = 0
+
+        try:
+            import cv2  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"Для записи MP4 нужен opencv-python: {e}")
+
+        self._cv2 = cv2
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        self._writer = cv2.VideoWriter(self.path, fourcc, self.fps, (self.width, self.height))
+        if not self._writer.isOpened():
+            raise RuntimeError(f"Не удалось открыть VideoWriter для: {self.path}")
+
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    @property
+    def dropped(self) -> int:
+        return int(self._dropped)
+
+    def write(self, frame_bgr):
+        """frame_bgr: numpy array uint8 HxWx3 (BGR)"""
+        if self._stop.is_set():
+            return
+        try:
+            self._q.put_nowait(frame_bgr)
+        except queue.Full:
+            self._dropped += 1
+
+    def close(self):
+        self._stop.set()
+        t = self._thread
+        if t:
+            try:
+                t.join(timeout=2.0)
+            except Exception:
+                pass
+        try:
+            self._writer.release()
+        except Exception:
+            pass
+
+    def _run(self):
+        cv2 = self._cv2
+        while (not self._stop.is_set()) or (not self._q.empty()):
+            try:
+                frame = self._q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                # гарантируем размер
+                if frame is None:
+                    continue
+                h, w = frame.shape[:2]
+                if (w, h) != (self.width, self.height):
+                    frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
+                self._writer.write(frame)
+            except Exception:
+                continue
 
 
 def discover_server(timeout: int = 5):
@@ -421,6 +536,10 @@ class MainWindow(QMainWindow):
         self.client_thread: Optional[WebRTCClientThread] = None
         self._discover_thread: Optional[DiscoverThread] = None
         self._first_frame_seen: bool = False
+        self._recorder: Optional[Mp4Recorder] = None
+        self._record_pending: bool = False
+        self._record_path: Optional[str] = None
+        self._record_fps: float = 30.0
         self.init_ui()
 
     def init_ui(self):
@@ -462,6 +581,16 @@ class MainWindow(QMainWindow):
         self.hq_cb = QCheckBox("HQ")
         self.hq_cb.setChecked(True)
         self.hq_cb.toggled.connect(self.video_widget.set_hq_scaling)
+
+        # Запись (клиент-side)
+        self.rec_btn = QPushButton("REC")
+        self.rec_btn.setCheckable(True)
+        self.rec_btn.setToolTip("Запись в MP4")
+        self.rec_btn.toggled.connect(self.toggle_recording)
+        self.rec_btn.setStyleSheet(
+            "QPushButton { font-weight: bold; padding: 4px 10px; }"
+            "QPushButton:checked { background-color: #b00020; color: white; }"
+        )
         
         control_layout.addWidget(QLabel("Хост:"))
         control_layout.addWidget(self.host_edit)
@@ -471,6 +600,7 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.connect_btn)
         control_layout.addWidget(self.fit_cb)
         control_layout.addWidget(self.hq_cb)
+        control_layout.addWidget(self.rec_btn)
         
         main_layout.addLayout(control_layout)
 
@@ -480,7 +610,7 @@ class MainWindow(QMainWindow):
 
         # Статус
         self.status_label = QLabel("Готов к подключению")
-        self.status_label.setStyleSheet("padding: 5px; background-color: #f0f0f0;")
+        self.status_label.setStyleSheet("padding: 6px; background-color: #1e1e1e; color: #dcdcdc;")
         main_layout.addWidget(self.status_label)
 
     def _fit_window_to_video(self, video_w: int, video_h: int):
@@ -519,6 +649,34 @@ class MainWindow(QMainWindow):
                 self._first_frame_seen = True
         except Exception:
             pass
+
+        # Запись: ждём первый кадр чтобы инициализировать writer
+        try:
+            if self._record_pending and isinstance(frame_data, tuple) and len(frame_data) == 3 and self._record_path:
+                _bytes, w, h = frame_data
+                self._recorder = Mp4Recorder(self._record_path, self._record_fps, int(w), int(h))
+                self._record_pending = False
+                self.status_label.setText(f"REC ▶ {self._record_path}")
+        except Exception as e:
+            self._record_pending = False
+            self._recorder = None
+            try:
+                self.rec_btn.setChecked(False)
+            except Exception:
+                pass
+            QMessageBox.critical(self, "Запись", f"Не удалось начать запись: {e}")
+
+        # Если запись активна — пишем кадр
+        if self._recorder:
+            try:
+                import numpy as np
+                img_bytes, w, h = frame_data
+                rgb = np.frombuffer(img_bytes, dtype=np.uint8).reshape((int(h), int(w), 3))
+                bgr = rgb[:, :, ::-1].copy()
+                self._recorder.write(bgr)
+            except Exception:
+                pass
+
         self.video_widget.update_frame(frame_data)
 
     def resizeEvent(self, event):
@@ -622,6 +780,9 @@ class MainWindow(QMainWindow):
         if self.client_thread:
             self.client_thread.stop()
             self.client_thread = None
+
+        # Остановить запись при отключении
+        self._stop_recording()
         
         self.connect_btn.setText("Подключиться")
         self.connect_btn.setEnabled(True)
@@ -630,6 +791,41 @@ class MainWindow(QMainWindow):
         self.discover_btn.setEnabled(True)
         self.video_widget.setText("Отключено")
         self.status_label.setText("Отключено")
+
+    def _stop_recording(self):
+        rec = self._recorder
+        self._recorder = None
+        self._record_pending = False
+        self._record_path = None
+        if rec:
+            try:
+                rec.close()
+            except Exception:
+                pass
+
+    def toggle_recording(self, enabled: bool):
+        """Старт/стоп записи MP4 по кнопке."""
+        if enabled:
+            default_name = f"recording_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+            try:
+                path, _flt = QFileDialog.getSaveFileName(self, "Сохранить запись", default_name, "MP4 Video (*.mp4)")
+            except Exception:
+                path = ""
+            if not path:
+                # пользователь отменил
+                self.rec_btn.setChecked(False)
+                return
+            if not path.lower().endswith(".mp4"):
+                path = path + ".mp4"
+
+            self._record_path = path
+            self._record_pending = True
+            self.status_label.setText("REC: ожидание первого кадра...")
+        else:
+            self._stop_recording()
+            # статус не трогаем если подключены — оставим текущий
+            if not (self.client_thread and self.client_thread.isRunning()):
+                self.status_label.setText("Готов к подключению")
 
     def on_error(self, message: str):
         """Обработка ошибки."""
@@ -668,7 +864,7 @@ def main():
             app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     except Exception:
         pass
-    app.setStyle("Fusion")  # Современный стиль
+    apply_dark_theme(app)
     
     window = MainWindow()
     window.show()
