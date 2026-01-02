@@ -335,21 +335,35 @@ async def run_server(args):
 
         @pc.on("connectionstatechange")
         async def on_state_change():
-            if pc.connectionState in ("failed", "disconnected", "closed"):
+            try:
+                if pc.connectionState in ("failed", "disconnected", "closed"):
+                    pcs.discard(pc)
+                    try:
+                        await pc.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        try:
+            sender = pc.addTrack(track)
+            _prefer_h264(pc)
+
+            # Качество: попросим encoder о более высоком битрейте/фпс
+            await _apply_sender_quality(sender, int(args.bitrate), int(args.fps))
+
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type=offer_type))
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            await _wait_ice_complete(pc)
+            return web.json_response({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
+        except Exception as e:
+            pcs.discard(pc)
+            try:
                 await pc.close()
-                pcs.discard(pc)
-
-        sender = pc.addTrack(track)
-        _prefer_h264(pc)
-
-        # Качество: попросим encoder о более высоком битрейте/фпс
-        await _apply_sender_quality(sender, int(args.bitrate), int(args.fps))
-
-        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type=offer_type))
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        await _wait_ice_complete(pc)
-        return web.json_response({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
+            except Exception:
+                pass
+            raise web.HTTPInternalServerError(text=f"Ошибка установки соединения: {e}")
 
     async def index(_request):
         return web.json_response({"status": "ok", "backend": "webrtc"})
