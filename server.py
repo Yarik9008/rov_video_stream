@@ -783,9 +783,9 @@ def main():
     
     # Обработка флага -t/--test
     if args.test:
-        test_video_path = r"C:\Users\Yarik\Documents\soft\video_stream\video\test.mp4"
+        test_video_path = Path(__file__).parent / "video" / "test.mp4"
         args.source = "file"
-        args.file = test_video_path
+        args.file = str(test_video_path)
         args.width = 0  # 0 означает использовать исходное разрешение
         args.height = 0  # 0 означает использовать исходное разрешение
         # Для тестового видео включаем max-quality и пытаемся взять FPS из файла,
@@ -793,13 +793,17 @@ def main():
         args.max_quality = True
         try:
             cv2, *_rest = _lazy_imports()
-            cap = cv2.VideoCapture(str(Path(test_video_path).resolve()))
-            try:
-                file_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-                if file_fps >= 1.0 and file_fps <= 240.0:
-                    args.fps = int(round(file_fps))
-            finally:
-                cap.release()
+            if test_video_path.exists():
+                cap = cv2.VideoCapture(str(test_video_path.resolve()))
+                try:
+                    file_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                    if file_fps >= 1.0 and file_fps <= 240.0:
+                        args.fps = int(round(file_fps))
+                finally:
+                    cap.release()
+            else:
+                # Warning will be logged later by the logger
+                pass
         except Exception:
             pass
 

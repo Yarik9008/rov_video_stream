@@ -2,10 +2,11 @@ from verboselogs import VerboseLogger, SPAM, NOTICE, VERBOSE
 from logging import DEBUG, INFO, WARNING, ERROR, CRITICAL
 from datetime import datetime
 from os.path import exists, join
-from os import mkdir
+from os import makedirs
 
 from time import gmtime
 
+import sys
 import logging
 import coloredlogs
 
@@ -31,7 +32,7 @@ loggingLevels = {
 
 
 class Logger:
-    '''Класс отвечающий за логирование. Логи пишуться в файл, так же выводться в консоль'''
+    '''Класс отвечающий за логирование. Логи пишутся в файл, также выводятся в консоль'''
     def __init__(self, name: str, path: str, level: int) -> None:
         
         self.mylogs = VerboseLogger(__name__)
@@ -43,7 +44,7 @@ class Logger:
 
         if self.path != "":
             if not exists(self.path):
-                mkdir(self.path)
+                makedirs(self.path, exist_ok=True)
 
         # обработчик записи в лог-файл
         fileName = datetime.utcnow().strftime(f"{name}_%d-%m-%Y") + ".log"
@@ -126,7 +127,7 @@ class Logger:
             self.lastLog["source"] = source
 
         self.mylogs.critical(message)
-        exit(-1) 
+        sys.exit(-1) 
 
     def error(self, message: str, source: str = "station") -> None:
         if self.level <= ERROR:

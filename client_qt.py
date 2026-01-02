@@ -1005,7 +1005,11 @@ def main():
         # Важно: если host == "auto" — нужно пройти discovery, а не стартовать WebRTC на "auto"
         QTimer.singleShot(0, window.connect)
 
-    sys.exit(app.exec())
+    # PyQt5/PyQt6 compatibility: exec_() vs exec()
+    if PYQT6:
+        sys.exit(app.exec())
+    else:
+        sys.exit(app.exec_())
 
 
 if __name__ == "__main__":

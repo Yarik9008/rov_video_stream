@@ -138,16 +138,19 @@ async def run_client(host: str, signal_port: int, stun: bool, logger: Logger):
     window_name = "WebRTC Video"
     try:
         cv2.destroyWindow(window_name)  # Закрываем, если уже существует
-    except:
+    except Exception:
         pass
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, 1280, 720)
     # Показываем черный экран, чтобы окно появилось сразу
-    import numpy as np
-    blank_img = np.zeros((720, 1280, 3), dtype=np.uint8)
-    cv2.putText(blank_img, "Подключение...", (50, 360), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
-    cv2.imshow(window_name, blank_img)
-    cv2.waitKey(1)  # Обновляем окно
+    try:
+        import numpy as np
+        blank_img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.putText(blank_img, "Подключение...", (50, 360), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
+        cv2.imshow(window_name, blank_img)
+        cv2.waitKey(1)  # Обновляем окно
+    except ImportError:
+        pass  # numpy не установлен, окно будет пустым
 
     @pc.on("track")
     def on_track(track):
