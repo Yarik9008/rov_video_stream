@@ -526,6 +526,79 @@ class GstWebRTCServer:
         return {"candidates": cands, "next": nxt}
 
 
+class GstRtpServer:
+    """
+    One-way RTP/H264 over UDP.
+    Works without GstWebRTC typelibs and still allows NVENC/NVDEC.
+    """
+
+    def __init__(self, args, logger: Logger):
+        self.args = args
+        self.logger = logger
+        self.pipeline: Optional[Gst.Pipeline] = None
+
+    def build_pipeline(self) -> Gst.Pipeline:
+        width = int(self.args.width)
+        height = int(self.args.height)
+        fps = int(self.args.fps)
+        bitrate = int(self.args.bitrate)
+        rtp_host = str(self.args.rtp_host)
+        rtp_port = int(self.args.rtp_port)
+
+        if self.args.source == "file":
+            file_path = str(Path(self.args.file).resolve())
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Файл не найден: {file_path}")
+
+            if self.args.file_passthrough:
+                pipe = (
+                    f'filesrc location="{file_path}" ! qtdemux name=demux '
+                    "demux.video_0 ! queue max-size-buffers=2 leaky=downstream ! "
+                    "h264parse ! rtph264pay pt=96 config-interval=1 ! "
+                    f"udpsink host={rtp_host} port={rtp_port} sync=false async=false"
+                )
+                self.logger.info("GST RTP server: file passthrough (no re-encode)", source="server_gst")
+            else:
+                enc = _nvenc_or_fallback(bitrate, fps)
+                pipe = (
+                    f'filesrc location="{file_path}" ! qtdemux ! queue max-size-buffers=2 leaky=downstream ! '
+                    "decodebin ! videoconvert ! video/x-raw,format=NV12 ! "
+                    f"{enc} ! h264parse ! rtph264pay pt=96 config-interval=1 ! "
+                    f"udpsink host={rtp_host} port={rtp_port} sync=false async=false"
+                )
+                self.logger.info("GST RTP server: file decode+encode (NVENC preferred)", source="server_gst")
+        else:
+            src = _make_video_source(int(self.args.device))
+            enc = _nvenc_or_fallback(bitrate, fps)
+            caps = f"video/x-raw,width={width},height={height},framerate={fps}/1"
+            pipe = (
+                f"{src} ! {caps} ! queue max-size-buffers=2 leaky=downstream ! "
+                "videoconvert ! video/x-raw,format=NV12 ! "
+                f"{enc} ! h264parse ! rtph264pay pt=96 config-interval=1 ! "
+                f"udpsink host={rtp_host} port={rtp_port} sync=false async=false"
+            )
+            self.logger.info("GST RTP server: webcam encode (NVENC preferred)", source="server_gst")
+
+        self.logger.info(f"GST RTP pipeline: {pipe}", source="server_gst")
+        pipeline = Gst.parse_launch(pipe)
+        if not isinstance(pipeline, Gst.Pipeline):
+            pipeline = pipeline  # type: ignore[assignment]
+        return pipeline
+
+    def start(self):
+        Gst.init(None)
+        self.pipeline = self.build_pipeline()
+        self.pipeline.set_state(Gst.State.PLAYING)
+
+    def stop(self):
+        if self.pipeline is not None:
+            try:
+                self.pipeline.set_state(Gst.State.NULL)
+            except Exception:
+                pass
+        self.pipeline = None
+
+
 class SignalingHandler(BaseHTTPRequestHandler):
     server: "SignalingHTTPServer"  # typing: ignore[assignment]
 
@@ -594,12 +667,20 @@ class SignalingHTTPServer(ThreadingHTTPServer):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GStreamer WebRTC Video Streaming Server (LAN, NVENC)")
+    parser = argparse.ArgumentParser(description="GStreamer Video Streaming Server (LAN, NVENC)")
     parser.add_argument("--source", choices=["webcam", "file"], default="webcam")
     parser.add_argument("--file", type=str, default=None)
     parser.add_argument("--file-passthrough", action="store_true", default=False, help="Для file: отправлять H.264 как есть (без NVENC)")
+    parser.add_argument(
+        "--transport",
+        choices=["rtp", "webrtc"],
+        default="rtp",
+        help="Транспорт: rtp (по умолчанию, не требует GstWebRTC typelibs) или webrtc (нужен GstWebRTC-1.0.typelib)",
+    )
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--signal-port", type=int, default=8080)
+    parser.add_argument("--rtp-host", type=str, default="239.255.0.1", help="RTP destination host (multicast by default)")
+    parser.add_argument("--rtp-port", type=int, default=5004, help="RTP destination UDP port")
     parser.add_argument("--width", type=int, default=3840)
     parser.add_argument("--height", type=int, default=2160)
     parser.add_argument("--fps", type=int, default=60)
@@ -626,8 +707,12 @@ def main():
         logger.info(f"webrtcbin: {'OK' if _element_exists('webrtcbin') else 'MISSING'}", source="server_gst")
         logger.info(f"nvh264enc: {'OK' if _element_exists('nvh264enc') else 'MISSING'}", source="server_gst")
         logger.info(f"nvh264dec: {'OK' if _element_exists('nvh264dec') else 'MISSING'}", source="server_gst")
-        tmp = GstWebRTCServer(args, logger)
-        pipeline, _webrtc = tmp._build_pipeline()
+        if args.transport == "webrtc":
+            tmp = GstWebRTCServer(args, logger)
+            pipeline, _webrtc = tmp._build_pipeline()
+        else:
+            tmp = GstRtpServer(args, logger)
+            pipeline = tmp.build_pipeline()
         pipeline.set_state(Gst.State.READY)
         pipeline.set_state(Gst.State.NULL)
         logger.info("Dry-run: OK", source="server_gst")
@@ -636,32 +721,45 @@ def main():
     local_ip = get_local_ip()
     local_ips = get_local_ips()
     payload = {
-        "backend": "gst-webrtc",
+        "backend": "gst-webrtc" if args.transport == "webrtc" else "gst-rtp",
         "host": local_ip,
         "signal_port": int(args.signal_port),
+        "rtp_host": str(args.rtp_host),
+        "rtp_port": int(args.rtp_port),
         "width": int(args.width),
         "height": int(args.height),
         "fps": int(args.fps),
     }
 
-    webrtc_server = GstWebRTCServer(args, logger)
-    webrtc_server.start()
+    webrtc_server: Optional[GstWebRTCServer] = None
+    rtp_server: Optional[GstRtpServer] = None
+    httpd: Optional[SignalingHTTPServer] = None
+
+    if args.transport == "webrtc":
+        webrtc_server = GstWebRTCServer(args, logger)
+        webrtc_server.start()
+        httpd = SignalingHTTPServer((args.host, int(args.signal_port)), SignalingHandler, webrtc_server=webrtc_server)
+        http_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        http_thread.start()
+    else:
+        rtp_server = GstRtpServer(args, logger)
+        rtp_server.start()
 
     broadcaster = DiscoveryBroadcaster(lambda: payload, enabled=(args.host != "127.0.0.1"))
     broadcaster.start()
 
-    httpd = SignalingHTTPServer((args.host, int(args.signal_port)), SignalingHandler, webrtc_server=webrtc_server)
-    http_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    http_thread.start()
-
-    logger.info("Запуск GStreamer WebRTC сервера (NVENC)...", source="server_gst")
+    logger.info("Запуск GStreamer сервера (NVENC)...", source="server_gst")
     logger.info(f"GStreamer: {Gst.version_string()}", source="server_gst")
     logger.info(f"Local IPs: {', '.join(local_ips) if local_ips else local_ip}", source="server_gst")
-    logger.info(f"Signaling: http://{local_ip}:{int(args.signal_port)}", source="server_gst")
     logger.info(f"Discovery UDP: {DiscoveryBroadcaster.DISCOVERY_PORT}", source="server_gst")
     logger.info(f"webrtcbin: {'OK' if _element_exists('webrtcbin') else 'MISSING'}", source="server_gst")
     logger.info(f"nvh264enc: {'OK' if _element_exists('nvh264enc') else 'MISSING'}", source="server_gst")
     logger.info(f"nvh264dec: {'OK' if _element_exists('nvh264dec') else 'MISSING'}", source="server_gst")
+    logger.info(f"Transport: {args.transport}", source="server_gst")
+    if args.transport == "webrtc":
+        logger.info(f"Signaling: http://{local_ip}:{int(args.signal_port)}", source="server_gst")
+    else:
+        logger.info(f"RTP: udp://{args.rtp_host}:{int(args.rtp_port)} (payload=96 H264)", source="server_gst")
     logger.info("Нажмите Ctrl+C для остановки.", source="server_gst")
 
     try:
@@ -674,14 +772,21 @@ def main():
             broadcaster.stop()
         except Exception:
             pass
-        try:
-            httpd.shutdown()
-        except Exception:
-            pass
-        try:
-            webrtc_server.stop()
-        except Exception:
-            pass
+        if httpd is not None:
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+        if webrtc_server is not None:
+            try:
+                webrtc_server.stop()
+            except Exception:
+                pass
+        if rtp_server is not None:
+            try:
+                rtp_server.stop()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

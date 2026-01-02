@@ -69,7 +69,7 @@ python -c "import sys; sys.path.insert(0, r'C:\Program Files\GStreamer\1.0\msvc_
 ### Запуск GPU сервера
 
 ```bash
-python3 server_gst.py --host 0.0.0.0 --signal-port 8080 --width 3840 --height 2160 --fps 60 --bitrate 250000
+python3 server_gst.py --host 0.0.0.0 --transport rtp --width 3840 --height 2160 --fps 60 --bitrate 250000
 ```
 
 Примечания:
@@ -81,6 +81,17 @@ python3 server_gst.py --host 0.0.0.0 --signal-port 8080 --width 3840 --height 21
 ```bash
 python3 client_gst.py --auto
 ```
+
+### Почему по умолчанию RTP, а не WebRTC
+
+На Windows в некоторых сборках GStreamer отсутствует `GstWebRTC-1.0.typelib`, и тогда Python не может делать negotiation через `webrtcbin`.
+Поэтому `server_gst.py` по умолчанию использует **RTP/UDP**, который:
+- не требует `GstWebRTC` typelibs
+- всё равно использует **NVENC/NVDEC**
+- даёт очень низкую задержку в LAN
+
+RTP поток по умолчанию идёт в multicast `udp://239.255.0.1:5004`.
+Если multicast в сети запрещён — укажите `--rtp-host <IP_клиента>` и откройте UDP порт `5004` в firewall.
 
 ### Режим file passthrough (макс. качество/мин. задержка, но без NVENC)
 

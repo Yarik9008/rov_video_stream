@@ -110,7 +110,7 @@ def discover_server(timeout: int = 5, logger: Optional[Logger] = None) -> Option
                 if not isinstance(info, dict):
                     continue
                 # accept both backends
-                if info.get("backend") not in ("gst-webrtc", "webrtc"):
+                if info.get("backend") not in ("gst-webrtc", "gst-rtp", "webrtc"):
                     continue
                 info["host"] = addr[0]
                 sock.close()
@@ -148,6 +148,44 @@ def _best_sink_element() -> str:
         if _element_exists(name):
             return name
     return "autovideosink"
+
+
+def run_rtp_client(rtp_host: str, rtp_port: int, logger: Logger):
+    """
+    One-way RTP/H264 over UDP (no WebRTC, no GstWebRTC typelibs needed).
+    """
+    rtp_host = str(rtp_host)
+    rtp_port = int(rtp_port)
+
+    decoder_name = "nvh264dec" if _element_exists("nvh264dec") else "avdec_h264"
+    sink_name = _best_sink_element()
+
+    # Note: udpsrc listens on port; host is informational (multicast requires multicast group)
+    caps = 'application/x-rtp,media=video,encoding-name=H264,payload=96'
+    pipe_str = (
+        f'udpsrc port={rtp_port} caps="{caps}" ! '
+        "rtpjitterbuffer latency=0 drop-on-late=true ! "
+        "rtph264depay ! h264parse ! "
+        f"{decoder_name} ! videoconvert ! "
+        f"{sink_name} sync=false"
+    )
+    logger.info(f"GST RTP pipeline: {pipe_str}", source="client_gst")
+    pipeline = Gst.parse_launch(pipe_str)
+    if isinstance(pipeline, Gst.Pipeline):
+        pipeline.set_state(Gst.State.PLAYING)
+
+    logger.info(f"RTP listen: udp://0.0.0.0:{rtp_port} (server advertises {rtp_host})", source="client_gst")
+    logger.info(f"Decoder: {decoder_name} | Sink: {sink_name}", source="client_gst")
+    try:
+        loop = GLib.MainLoop()
+        loop.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            pipeline.set_state(Gst.State.NULL)
+        except Exception:
+            pass
 
 
 class GstWebRTCClient:
@@ -372,10 +410,13 @@ class GstWebRTCClient:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GStreamer WebRTC Video Streaming Client (LAN, NVDEC)")
+    parser = argparse.ArgumentParser(description="GStreamer Video Streaming Client (LAN, NVDEC)")
     parser.add_argument("--host", type=str, default="auto", help='IP сервера или "auto"')
     parser.add_argument("--signal-port", type=int, default=8080)
     parser.add_argument("--auto", action="store_true", default=False)
+    parser.add_argument("--transport", choices=["auto", "rtp", "webrtc"], default="auto")
+    parser.add_argument("--rtp-host", type=str, default="239.255.0.1")
+    parser.add_argument("--rtp-port", type=int, default=5004)
     parser.add_argument("--webrtc-latency", type=int, default=0, help="webrtcbin jitterbuffer latency (ms)")
     parser.add_argument("--dry-run", action="store_true", default=False, help="Проверить элементы/сборку pipeline и выйти")
     parser.add_argument("--log-level", type=str, default="info", choices=["spam", "debug", "verbose", "info", "warning", "error", "critical"])
@@ -391,6 +432,9 @@ def main():
     auto = args.auto or (str(args.host).lower() == "auto")
     host = str(args.host)
     port = int(args.signal_port)
+    rtp_host = str(args.rtp_host)
+    rtp_port = int(args.rtp_port)
+    backend = None
 
     if auto:
         info = discover_server(timeout=5, logger=logger)
@@ -398,6 +442,9 @@ def main():
             raise SystemExit("Сервер не найден в локальной сети.")
         host = str(info.get("host") or host)
         port = int(info.get("signal_port") or port)
+        rtp_host = str(info.get("rtp_host") or rtp_host)
+        rtp_port = int(info.get("rtp_port") or rtp_port)
+        backend = str(info.get("backend") or "")
 
     logger.info(f"Подключение к {host}:{port}", source="client_gst")
     logger.info(f"GStreamer: {Gst.version_string()}", source="client_gst")
@@ -407,12 +454,24 @@ def main():
     if args.dry_run:
         # Just validate base GStreamer availability without requiring GstWebRTC typelibs.
         Gst.init(None)
-        pipe_str = f"webrtcbin name=webrtc bundle-policy=max-bundle latency={int(args.webrtc_latency)}"
-        pipeline = Gst.parse_launch(pipe_str)
-        if isinstance(pipeline, Gst.Pipeline):
-            pipeline.set_state(Gst.State.READY)
-            pipeline.set_state(Gst.State.NULL)
-        logger.info("Dry-run: base pipeline OK (note: negotiation requires GstWebRTC typelibs)", source="client_gst")
+        logger.info("Dry-run: OK", source="client_gst")
+        return
+
+    # Transport selection
+    transport = str(args.transport)
+    if transport == "auto":
+        if backend == "gst-rtp":
+            transport = "rtp"
+        else:
+            # If WebRTC typelibs are missing, fall back to RTP when possible.
+            try:
+                _require_gstwebrtc()
+                transport = "webrtc"
+            except Exception:
+                transport = "rtp"
+
+    if transport == "rtp":
+        run_rtp_client(rtp_host, rtp_port, logger)
         return
 
     client = GstWebRTCClient(host, port, logger, webrtc_latency_ms=int(args.webrtc_latency))
