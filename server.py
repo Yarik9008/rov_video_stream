@@ -733,8 +733,10 @@ def main():
     parser.add_argument("-t", "--test", action="store_true", default=False, help="Транслировать тестовое видео test.mp4 в исходном разрешении")
     parser.add_argument("--host", type=str, default=None, help="Хост для режима LAN (обычно 0.0.0.0)")
     parser.add_argument("--signal-port", type=int, default=8080, help="Порт HTTP signaling (по умолчанию 8080)")
-    parser.add_argument("--width", type=int, default=0, help="Ширина (0 для исходного разрешения, по умолчанию 0 - максимальное качество)")
-    parser.add_argument("--height", type=int, default=0, help="Высота (0 для исходного разрешения, по умолчанию 0 - максимальное качество)")
+    # По умолчанию пытаемся отдавать 4K (3840x2160).
+    # Если хотите передавать в нативном разрешении источника — укажите: --width 0 --height 0
+    parser.add_argument("--width", type=int, default=3840, help="Ширина (по умолчанию 3840 = 4K; 0 = исходное разрешение)")
+    parser.add_argument("--height", type=int, default=2160, help="Высота (по умолчанию 2160 = 4K; 0 = исходное разрешение)")
     parser.add_argument("--fps", type=int, default=30, help="FPS (рекомендуется 30-60 для максимального качества)")
     # Максимальное качество включено по умолчанию.
     # argparse.BooleanOptionalAction создаёт флаги:
