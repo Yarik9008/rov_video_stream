@@ -786,18 +786,7 @@ def main():
         args.file = str(test_video_path)
         args.width = 0  # Используем исходное разрешение
         args.height = 0
-        try:
-            cv2, *_rest = _lazy_imports()
-            if test_video_path.exists():
-                cap = cv2.VideoCapture(str(test_video_path.resolve()))
-                try:
-                    file_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-                    if file_fps >= 1.0 and file_fps <= 240.0:
-                        args.fps = int(round(file_fps))
-                finally:
-                    cap.release()
-        except Exception:
-            pass
+        args.fps = 60  # Устанавливаем 60 FPS для тестового видео
     
     log_level = loggingLevels.get(args.log_level, INFO)
     logger = Logger("server", args.log_path, log_level)
