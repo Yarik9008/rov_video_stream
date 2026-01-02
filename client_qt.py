@@ -568,7 +568,8 @@ class VideoWidget(QLabel):
             center_y = widget_height // 2
             
             # Параметры прицела
-            line_length = min(widget_width, widget_height) * 0.15  # 15% от минимального размера
+            line_length = int(min(widget_width, widget_height) * 0.15)  # 15% от минимального размера
+            line_gap = int(line_length * 0.3)  # Отступ от центра (30% от длины линии)
             line_thickness = 2
             
             # Цвет прицела (белый с небольшой прозрачностью для лучшей видимости)
@@ -577,13 +578,13 @@ class VideoWidget(QLabel):
             
             # Рисуем 4 линии по кругу (12, 3, 6, 9 часов на циферблате)
             # Линия вверх (12 часов)
-            painter.drawLine(center_x, center_y - line_length, center_x, center_y - line_length * 0.3)
+            painter.drawLine(center_x, center_y - line_length, center_x, center_y - line_gap)
             # Линия вправо (3 часа)
-            painter.drawLine(center_x + line_length * 0.3, center_y, center_x + line_length, center_y)
+            painter.drawLine(center_x + line_gap, center_y, center_x + line_length, center_y)
             # Линия вниз (6 часов)
-            painter.drawLine(center_x, center_y + line_length * 0.3, center_x, center_y + line_length)
+            painter.drawLine(center_x, center_y + line_gap, center_x, center_y + line_length)
             # Линия влево (9 часов)
-            painter.drawLine(center_x - line_length, center_y, center_x - line_length * 0.3, center_y)
+            painter.drawLine(center_x - line_length, center_y, center_x - line_gap, center_y)
             
             painter.end()
 
