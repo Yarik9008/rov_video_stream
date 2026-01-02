@@ -25,7 +25,7 @@ from Logger import Logger, loggingLevels
 PYQT6 = False
 try:
     from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
-    from PyQt6.QtGui import QImage, QPixmap, QColor, QPalette
+    from PyQt6.QtGui import QImage, QPixmap, QColor, QPalette, QPainter, QPen
     from PyQt6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -45,7 +45,7 @@ try:
 except ImportError:
     try:
         from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
-        from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette
+        from PyQt5.QtGui import QImage, QPixmap, QColor, QPalette, QPainter, QPen
         from PyQt5.QtWidgets import (
             QApplication,
             QCheckBox,
@@ -548,6 +548,44 @@ class VideoWidget(QLabel):
         """Перерисовать последний кадр (например, после ресайза окна)."""
         if self._last_frame_bytes and self._last_w > 0 and self._last_h > 0:
             self.update_frame((self._last_frame_bytes, self._last_w, self._last_h))
+
+    def paintEvent(self, event):
+        """Переопределяем paintEvent для рисования прицела поверх видео."""
+        # Сначала вызываем родительский метод для отрисовки видео
+        super().paintEvent(event)
+        
+        # Рисуем прицел только если есть pixmap (видео отображается)
+        if self.pixmap() and not self.pixmap().isNull():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing if PYQT6 else QPainter.Antialiasing)
+            
+            # Размеры виджета
+            widget_width = self.width()
+            widget_height = self.height()
+            
+            # Центр виджета
+            center_x = widget_width // 2
+            center_y = widget_height // 2
+            
+            # Параметры прицела
+            line_length = min(widget_width, widget_height) * 0.15  # 15% от минимального размера
+            line_thickness = 2
+            
+            # Цвет прицела (белый с небольшой прозрачностью для лучшей видимости)
+            pen = QPen(QColor(255, 255, 255, 220), line_thickness)
+            painter.setPen(pen)
+            
+            # Рисуем 4 линии по кругу (12, 3, 6, 9 часов на циферблате)
+            # Линия вверх (12 часов)
+            painter.drawLine(center_x, center_y - line_length, center_x, center_y - line_length * 0.3)
+            # Линия вправо (3 часа)
+            painter.drawLine(center_x + line_length * 0.3, center_y, center_x + line_length, center_y)
+            # Линия вниз (6 часов)
+            painter.drawLine(center_x, center_y + line_length * 0.3, center_x, center_y + line_length)
+            # Линия влево (9 часов)
+            painter.drawLine(center_x - line_length, center_y, center_x - line_length * 0.3, center_y)
+            
+            painter.end()
 
 
 class MainWindow(QMainWindow):
